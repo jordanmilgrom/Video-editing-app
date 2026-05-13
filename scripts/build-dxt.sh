@@ -57,7 +57,7 @@ python3 -m pip download \
 
 echo "==> Install wheels into server/lib"
 python3 -m pip install \
-  --target "$BUILD/server/lib" --no-deps --no-index \
+  --target "$BUILD/server/lib" --no-deps --no-index --break-system-packages \
   --find-links "$BUILD/wheels" \
   "${PY_PLATFORMS[@]}" "${PY_FLAGS[@]}" \
   "$BUILD"/wheels/*.whl \
