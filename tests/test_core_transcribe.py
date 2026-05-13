@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from roughcut import transcribe
-from roughcut.models import Transcript
+from roughcut_core import transcribe
+from roughcut_core.models import Transcript
 from tests.conftest import requires_ffmpeg
 
 

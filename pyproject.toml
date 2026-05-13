@@ -4,16 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roughcut"
-version = "0.1.0"
-description = "AI rough-cut tool: interview + b-roll folders → FCPXML."
+version = "0.2.0"
+description = "MCP-first rough-cut tool: deterministic video capabilities for agent-driven editing."
 requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "roughcut" }]
 dependencies = [
-    "typer>=0.12",
     "pydantic>=2.7",
-    "anthropic>=0.40",
     "ffmpeg-python>=0.2.0",
     "Pillow>=10.3",
     "mlx-whisper>=0.4 ; platform_system == 'Darwin' and platform_machine == 'arm64'",
@@ -25,14 +23,8 @@ dev = [
     "pytest-mock>=3.12",
 ]
 
-[project.scripts]
-roughcut = "roughcut.cli:app"
-
 [tool.setuptools.packages.find]
-include = ["roughcut*"]
-
-[tool.setuptools.package-data]
-roughcut = ["prompts/*.md"]
+include = ["roughcut_core*", "roughcut_mcp*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

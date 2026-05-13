@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from roughcut.models import Segment, Transcript, Word
+from roughcut_core.models import Segment, Transcript, Word
 
 DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-mlx"
 AUDIO_SAMPLE_RATE = 16_000

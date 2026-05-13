@@ -5,8 +5,8 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from roughcut import fcpxml
-from roughcut.models import BrollMatch, Clip, Sequence, Take
+from roughcut_core import fcpxml
+from roughcut_core.models import BrollMatch, Clip, Sequence, Take
 
 
 def _build_sequence(tmp_path: Path) -> Sequence:

@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from math import gcd
 from pathlib import Path
 
-from roughcut.models import Sequence
+from roughcut_core.models import Sequence
 
 _FPS_TABLE = {
     23.976: (24000, 1001),

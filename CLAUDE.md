@@ -1,120 +1,76 @@
-# roughcut — AI rough-cut tool for video editors
+# roughcut — MCP-first AI rough-cut tool
 
-A Python CLI that ingests a folder of interview footage and a folder of b-roll
-clips and emits an FCPXML rough cut that imports cleanly into Premiere Pro and
-DaVinci Resolve. A-roll lives on V1, selected b-roll on V2, clips relink to
-source by absolute path.
+A capability library + MCP server for AI-driven rough-cut editing. The
+agent (Claude Desktop, Claude Code, or another MCP-compatible client)
+drives reasoning by calling our tools. We expose deterministic video
+capabilities; we do not embed an LLM.
+
+For the live refactor plan and phase tracker, see `REFACTOR.md`.
 
 ## Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ interview/   │     │ broll/       │     │ script.txt?  │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       ▼                    ▼                    │
- transcribe.py          broll.py                 │
- (mlx-whisper)      (ffmpeg frame grid           │
-       │             + Claude vision)            │
-       │                    │                    │
-       ▼                    │                    │
-   takes.py  ◀──────────────┼────────────────────┘
- (silence split,            │
-  Claude pick best)         │
-       │                    │
-       └─────────┬──────────┘
-                 ▼
-            match.py
-       (Claude semantic match
-        sentence → b-roll)
-                 │
-                 ▼
-            fcpxml.py
-       (V1 A-roll, V2 b-roll,
-        absolute paths)
-                 │
-                 ▼
-           cut.fcpxml
+            ┌─────────────────┐
+            │ roughcut_mcp/   │   ← stdio server, tool wrappers
+            └────────┬────────┘
+                     │
+                     ▼
+            ┌─────────────────┐
+            │ roughcut_core/  │   ← transcribe, takes, broll,
+            │                 │     clips, fcpxml, models
+            └─────────────────┘
+
+  roughcut_core  has zero MCP imports — usable as a plain Python lib.
+  roughcut_mcp   has zero ffmpeg/whisper imports — delegates to core.
 ```
 
-Every module is independently testable, < 200 LOC, and writes its outputs to
-a cache directory keyed by content hash so reruns are cheap.
+## Module responsibilities
 
-## Data flow
+- **`roughcut_core/transcribe.py`** — ffmpeg audio extract +
+  mlx-whisper, cached by `(abs_path, size, mtime_ns)` + model.
+- **`roughcut_core/takes.py`** — `cluster_by_silence` and
+  `align_to_script`. Pure functions; no LLM. Surfaces structural views
+  of a transcript so the agent can pick takes.
+- **`roughcut_core/broll.py`** — frame extraction + contact-sheet
+  tiling with optional timecode overlay. No vision call here; the
+  agent reads the sheet through the MCP image-content tool.
+- **`roughcut_core/clips.py`** — ffprobe inventory; returns
+  `ClipMeta` per video file.
+- **`roughcut_core/fcpxml.py`** — FCPXML v1.10 emission. A-roll on
+  the spine (V1), b-roll nested at `lane="1"` (V2). Times snap to
+  rational frame boundaries.
+- **`roughcut_core/models.py`** — Pydantic v2 contracts:
+  `Transcript`/`Segment`/`Word`, `TakeCluster`, `ScriptAlignment`,
+  `ClipMeta`. (`Take`/`Clip`/`BrollMatch`/`Sequence` retained until
+  `fcpxml.py` is migrated to `SequenceSpec` in Phase C.)
+- **`roughcut_mcp/server.py`** — stdio entrypoint. Logs to stderr;
+  stdout reserved for the MCP protocol.
+- **`roughcut_mcp/tools.py`** — tool registrations. Each tool
+  validates inputs (absolute paths only), delegates to core, returns
+  structured results or structured errors.
 
-1. **CLI parses args** → `cli.py` builds an `IngestSpec` (paths to interview
-   folder, b-roll folder, optional script, output path, cache dir).
-2. **Transcription** → for each interview file: extract audio with ffmpeg to
-   16 kHz mono WAV, run mlx-whisper with `word_timestamps=True`, persist
-   `Transcript` (segments + words with start/end seconds) to
-   `.roughcut-cache/transcripts/<hash>.json`.
-3. **Take detection** → `takes.py` consumes transcripts. Two strategies:
-   - **With script**: align spoken text against script lines (fuzzy match)
-     and group consecutive matches to the same line as repeat takes.
-   - **No script**: detect silence gaps > 2.0 s as take boundaries, then
-     ask Claude to cluster groups that read the same content.
-4. **Pick best take** → for each take cluster, send Claude variants (text +
-   timecodes), tool-use call returns chosen `Take` (clip id, in/out, reason).
-5. **B-roll analysis** → for each broll clip: pull 16 frames evenly spaced,
-   tile into a 4×4 grid (Pillow), overlay each cell with its source timecode,
-   send PNG to Claude vision. Save structured `Clip` (subject, motion, mood,
-   tags, suggested_in/out) to `.roughcut-cache/broll/<hash>.json`.
-6. **Match** → split chosen A-roll transcript into sentences. For each
-   sentence, Claude picks 0–3 inserts from the b-roll library by semantic
-   relevance and returns `BrollMatch` (clip_id, in, out, sentence_index).
-7. **FCPXML** → `fcpxml.py` builds an FCPXML v1.10 doc:
-   - `<resources>`: one `<asset>` per unique source file (absolute path).
-   - `<library>` → `<event>` → `<project>` → `<sequence>` → `<spine>`.
-   - A-roll: contiguous `<asset-clip>` on lane 0 (V1).
-   - B-roll: connected `<asset-clip>` on lane 1 (V2) at matched offsets.
-   - Frame rate snapped to A-roll source.
+## Hard constraints
 
-## Module-by-module build order
-
-We build incrementally. **Stop after each module and wait for verification.**
-
-1. **`models.py`** — Pydantic v2 types: `Word`, `Segment`, `Transcript`,
-   `Take`, `Clip`, `BrollMatch`, `Sequence`, `IngestSpec`. Defines the
-   contract every other module depends on.
-2. **`claude.py`** — anthropic SDK wrapper. Loads prompts from
-   `roughcut/prompts/`, runs tool-use calls with structured JSON output,
-   handles retries with exponential backoff, exposes a `call(prompt_name,
-   schema, **vars)` interface and a `call_vision(prompt_name, image, schema)`
-   variant. Model: `claude-sonnet-4-6`.
-3. **`transcribe.py`** ← **STARTING POINT for implementation pass.**
-   ffmpeg audio extract + mlx-whisper + cache. End-to-end with a tiny
-   fixture so the user can verify before we move on.
-4. **`takes.py`** — silence split, fuzzy script align, Claude best-take pick.
-5. **`broll.py`** — ffmpeg frame extract, Pillow contact sheet, Claude vision.
-6. **`match.py`** — sentence chunking + Claude match call.
-7. **`fcpxml.py`** — XML construction, Premiere/Resolve smoke test.
-8. **`cli.py`** — final wiring of all modules behind the Typer CLI.
+- Zero `anthropic` SDK references anywhere.
+- Zero hardcoded LLM prompts in code — agents bring their own reasoning.
+- Every tool description tells the agent **when** to use the tool, not
+  just what it does.
+- `roughcut_core/` has zero MCP imports.
+- `roughcut_mcp/` has zero ffmpeg/whisper imports.
+- Every module stays under 200 LOC.
 
 ## Caching
 
-Everything cacheable is keyed by `sha256(mtime + size + absolute_path)` of
-the source file. Cache layout:
-
 ```
 .roughcut-cache/
-  transcripts/<hash>.json     # Transcript
-  broll/<hash>.json           # Clip
-  broll-grids/<hash>.png      # contact sheet (for debugging)
-  claude/<call_hash>.json     # raw tool-use responses, optional
+  transcripts/<safe_model>/<hash>.json
+  broll-grids/<hash>.png            (added by Phase D when frame_grid lands)
 ```
 
-Cache writes are atomic (tmp file + rename).
+Cache writes are atomic (tmp + rename). Cache keys are
+`sha256(abs_path + size + mtime_ns)`.
 
-## Conventions
+## Out of scope (v0.2)
 
-- All prompts in `roughcut/prompts/*.md`, loaded at runtime — never inlined.
-- Every Claude call uses tool-use for structured output. Never freeform
-  parsing.
-- Pydantic models are the single source of truth for shapes.
-- Modules stay under 200 LOC; refactor before exceeding.
-- No GUI, no web server, no database. JSON on disk.
-
-## Out of scope (v1)
-
-Music, color/audio adjustments, multicam, speaker diarization, frontend,
-auth, billing, cloud.
+Music, color/audio adjustments, multicam, speaker diarization, GUI,
+HTTP/REST wrapper, auth, billing, cloud anything.
