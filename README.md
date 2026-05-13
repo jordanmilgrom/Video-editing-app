@@ -33,20 +33,16 @@ locally: transcribe, cluster takes, contact-sheet frames, build FCPXML.
 That's it. Open a new Claude Desktop chat, look for the tools / plug
 icon, and `roughcut` should be listed with eight tools.
 
-ffmpeg, ffprobe, mlx-whisper, and all Python deps are bundled inside
-the `.dxt` — no Terminal, no Homebrew, no `pip install`.
+ffmpeg, ffprobe, mlx-whisper, **a portable Python 3.11 interpreter**,
+and all Python deps are bundled inside the `.dxt` — no Terminal, no
+Homebrew, no `pip install`. Claude Desktop launches the bundled
+interpreter directly, so it doesn't matter what version of `python3`
+your Mac has (or doesn't have) on its system PATH.
 
 ### Requirements
 
 - macOS with Apple Silicon (M1 / M2 / M3 / M4). Intel Macs cannot run
   local Whisper transcription.
-- Python 3.11+ on PATH. Recent macOS ships this; if you get a
-  "Python 3.11 not found" error, install it with one Terminal command:
-  ```
-  brew install python@3.11
-  ```
-  (one-time only; Homebrew install instructions at
-  <https://brew.sh> if you don't have it.)
 - Claude Desktop with a paid subscription (Pro / Team / Enterprise).
 
 ---

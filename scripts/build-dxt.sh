@@ -34,6 +34,18 @@ echo "==> Clean $BUILD"
 rm -rf "$BUILD" "$ARTIFACT"
 mkdir -p "$BUILD/server/bin" "$BUILD/server/lib" "$BUILD/wheels"
 
+echo "==> Fetch portable Python 3.11 (python-build-standalone, macOS arm64)"
+# Bundled so Claude Desktop never has to resolve `python3` against the GUI PATH
+# (which is /usr/bin/python3 = 3.9 on Sequoia, regardless of what the user has
+# in their shell). Pinned version; bump in lockstep across builds.
+PBS_TAG="20260510"
+PBS_FILE="cpython-3.11.15+${PBS_TAG}-aarch64-apple-darwin-install_only_stripped.tar.gz"
+PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${PBS_FILE}"
+curl -fsSL -o "$BUILD/pbs.tar.gz" "$PBS_URL"
+tar -xzf "$BUILD/pbs.tar.gz" -C "$BUILD/server"
+rm "$BUILD/pbs.tar.gz"
+test -x "$BUILD/server/python/bin/python3.11"
+
 echo "==> Fetch ffmpeg + ffprobe (macOS arm64) from npm"
 (
   cd "$BUILD"

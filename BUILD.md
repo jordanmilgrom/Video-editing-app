@@ -4,25 +4,32 @@
 bash scripts/build-dxt.sh
 ```
 
-That's it. Output lands at `./roughcut.dxt` (~130 MB).
+That's it. Output lands at `./roughcut.dxt` (~170 MB).
 
 ## What the script does
 
 1. Wipes any previous `dxt-build/` tree.
-2. Fetches static `ffmpeg` + `ffprobe` (macOS arm64) from the
+2. Fetches a portable CPython 3.11 (`python-build-standalone`,
+   `aarch64-apple-darwin`, `install_only_stripped` variant) from the
+   `astral-sh/python-build-standalone` GitHub release and extracts it
+   to `dxt-build/server/python/`. The manifest points `command` at
+   this bundled interpreter, so Claude Desktop never has to resolve
+   `python3` against the GUI PATH (which on Sequoia is `/usr/bin/python3`
+   = 3.9 and would fail any 3.11 preflight check).
+3. Fetches static `ffmpeg` + `ffprobe` (macOS arm64) from the
    `@ffmpeg-installer/darwin-arm64` and `@ffprobe-installer/darwin-arm64`
    npm packages.
-3. `pip download`s Python wheels for `darwin / arm64 / cp311`, plus
+4. `pip download`s Python wheels for `darwin / arm64 / cp311`, plus
    transitives, into `dxt-build/wheels/`.
-4. `pip install --target dxt-build/server/lib --no-deps --no-index`
-   so the runtime can find them via `PYTHONPATH`.
-5. Prunes `torch`, `sympy`, `networkx`, `jinja2`, `mpmath`, and
+5. `pip install --target dxt-build/server/lib --no-deps --no-index`
+   so the bundled Python can find them via `PYTHONPATH`.
+6. Prunes `torch`, `sympy`, `networkx`, `jinja2`, `mpmath`, and
    `mlx_whisper/torch_whisper.py` — those are only used by
    mlx-whisper's HF→MLX checkpoint converter, which we don't ship.
    Saves ~410 MB.
-6. Copies `roughcut_core/`, `roughcut_mcp/`, `dxt/manifest.json`, and
+7. Copies `roughcut_core/`, `roughcut_mcp/`, `dxt/manifest.json`, and
    `dxt/main.py` into the staging tree.
-7. Runs `npx @anthropic-ai/dxt validate` on the manifest, then
+8. Runs `npx @anthropic-ai/dxt validate` on the manifest, then
    `npx @anthropic-ai/dxt pack` to produce `roughcut.dxt`.
 
 ## Build-host requirements
@@ -33,7 +40,8 @@ That's it. Output lands at `./roughcut.dxt` (~130 MB).
 - `node` + `npm` (for `npx` and the `npm pack` step that pulls the
   ffmpeg binaries).
 - ~1 GB free disk during the build.
-- Network: pypi.org, registry.npmjs.org.
+- Network: pypi.org, registry.npmjs.org, github.com (for the
+  python-build-standalone release tarball).
 
 You do **not** need to be on macOS to build the `.dxt`. Wheels are
 downloaded with `--platform macosx_*_arm64` and the ffmpeg binaries
