@@ -1,0 +1,64 @@
+{
+  "dxt_version": "0.1",
+  "name": "roughcut",
+  "display_name": "roughcut — AI rough-cut assistant",
+  "version": "0.4.0",
+  "description": "First-draft video editor driven by your Claude agent. Bundles ffmpeg + all Python deps; no Terminal required.",
+  "long_description": "Point roughcut at a folder of interview footage and a folder of b-roll. The agent picks the cleanest takes, decides where b-roll fits, and writes a Premiere / DaVinci Resolve project file. roughcut does the deterministic work (transcribe, cluster takes, contact-sheet frames, build FCPXML); your Claude subscription pays for the reasoning. macOS Apple Silicon only.",
+  "author": {
+    "name": "roughcut"
+  },
+  "license": "MIT",
+  "keywords": ["video", "editing", "fcpxml", "premiere", "davinci-resolve", "whisper", "mlx"],
+  "compatibility": {
+    "platforms": ["darwin"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["${__dirname}/server/main.py"],
+      "env": {
+        "PYTHONPATH": "${__dirname}/server:${__dirname}/server/lib",
+        "PATH": "${__dirname}/server/bin:${PATH}",
+        "ROUGHCUT_INTERVIEW_DIR": "${user_config.interview_folder}",
+        "ROUGHCUT_BROLL_DIR": "${user_config.broll_folder}",
+        "ROUGHCUT_SCRIPT_PATH": "${user_config.script_path}"
+      }
+    }
+  },
+  "tools": [
+    {"name": "list_clips", "description": "Inventory video files in a folder via ffprobe."},
+    {"name": "transcribe_video", "description": "Local mlx-whisper transcription with word timestamps."},
+    {"name": "cluster_takes_by_silence", "description": "Group transcript segments by silence boundaries."},
+    {"name": "align_takes_to_script", "description": "Fuzzy-match transcript segments against script lines."},
+    {"name": "extract_frame_grid", "description": "Sample frames from a clip into a contact sheet."},
+    {"name": "get_clip_thumbnail", "description": "Extract one frame at a specific timecode."},
+    {"name": "generate_fcpxml", "description": "Write FCPXML v1.10 to disk from a SequenceSpec."},
+    {"name": "get_project_paths", "description": "Return the user-configured interview, b-roll, and script paths."}
+  ],
+  "user_config": {
+    "interview_folder": {
+      "type": "directory",
+      "title": "Interview footage folder",
+      "description": "Folder containing your sit-down / talking-head clips. Used by the get_project_paths tool so the agent doesn't have to ask each session.",
+      "required": false
+    },
+    "broll_folder": {
+      "type": "directory",
+      "title": "B-roll folder",
+      "description": "Folder containing supporting visuals (cutaways, archival footage). Optional.",
+      "required": false
+    },
+    "script_path": {
+      "type": "file",
+      "title": "Script (.txt or .md)",
+      "description": "Plain-text script the agent will align takes against. Skip if you have no script — the agent will cluster by silence instead.",
+      "required": false
+    }
+  }
+}

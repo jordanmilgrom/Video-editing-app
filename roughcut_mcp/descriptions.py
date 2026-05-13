@@ -78,3 +78,14 @@ GET_CLIP_THUMBNAIL = (
     "after a contact-sheet pass surfaces an interesting cell. "
     "`video_path` MUST be absolute."
 )
+
+GET_PROJECT_PATHS = (
+    "Return the interview folder, b-roll folder, and script path the "
+    "user configured when installing the roughcut extension. Values "
+    "come from the Claude Desktop user_config UI; each field may be "
+    "unset (returned as null).\n\n"
+    "Call this FIRST in any new conversation, before asking the user "
+    "for paths. If a field is set, use it directly. If a field is "
+    "null, ask the user to drag the folder/file into chat. Never make "
+    "up paths."
+)

@@ -2,135 +2,73 @@
 
 **A first-draft video editor that runs from your AI agent.**
 
-You point your chat agent (Claude Desktop, Claude Code) at a folder of
-interview footage and a folder of b-roll clips. The agent picks the
-cleanest takes, decides where b-roll fits, and writes a Premiere /
-DaVinci Resolve project file. You open the file in your editor and
-take it from there.
+You point your chat agent (Claude Desktop) at a folder of interview
+footage and a folder of b-roll clips. The agent picks the cleanest
+takes, decides where b-roll fits, and writes a Premiere / DaVinci
+Resolve project file. You open the file in your editor and take it
+from there.
 
 It is not finishing your edit. It is doing the first pass — the slow,
 tedious part — so you can start cutting from something instead of from
 nothing.
 
-This project ships as an **MCP server** with seven tools. The reasoning
-happens in your agent (using its subscription, not your API key); we
-just expose deterministic video capabilities: transcribe, cluster takes,
-contact-sheet frames, build FCPXML.
+This project ships as a **Claude Desktop Extension (`.dxt`)**. The
+reasoning happens in your agent (using your Claude Desktop
+subscription, not your API key); roughcut does the deterministic work
+locally: transcribe, cluster takes, contact-sheet frames, build FCPXML.
 
 ---
 
-## What you need (one-time setup)
+## Install (recommended)
 
-A Mac with Apple Silicon (M1 / M2 / M3 / M4). Local transcription does
-not work on Intel.
+1. Download the latest `roughcut.dxt` from the
+   [Releases page](https://github.com/jordanmilgrom/video-editing-app/releases).
+2. **Double-click `roughcut.dxt`.** Claude Desktop opens, asks you to
+   confirm the install, then prompts for three optional paths:
+   - **Interview folder** — where your sit-down clips live
+   - **B-roll folder** — where your cutaways / supporting visuals live
+   - **Script (`.txt` or `.md`)** — leave blank if you have no script
+3. Click **Install**.
 
-Three pieces of software, installed in this order:
+That's it. Open a new Claude Desktop chat, look for the tools / plug
+icon, and `roughcut` should be listed with eight tools.
 
-### 1. Homebrew
+ffmpeg, ffprobe, mlx-whisper, and all Python deps are bundled inside
+the `.dxt` — no Terminal, no Homebrew, no `pip install`.
 
-Homebrew installs other tools. Open **Terminal** (search for it in
-Spotlight) and paste:
+### Requirements
 
-```
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-Follow the prompts.
-
-### 2. ffmpeg and Python 3.11
-
-In the same Terminal:
-
-```
-brew install ffmpeg python@3.11
-```
-
-### 3. Claude Desktop
-
-Download from <https://claude.ai/download>. Sign in.
-
-(You don't need an Anthropic API key. Your Claude Desktop subscription
-pays for reasoning. roughcut does the deterministic work locally.)
-
----
-
-## Install roughcut
-
-In Terminal, navigate to wherever this project lives — for example, if
-you saved it on your Desktop:
-
-```
-cd ~/Desktop/Video-editing-app
-```
-
-Then:
-
-```
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-That's it. You now have a `roughcut-mcp` command inside
-`.venv/bin/`. Confirm it:
-
-```
-which roughcut-mcp
-```
-
-You should see an absolute path.
-
----
-
-## Wire roughcut into Claude Desktop
-
-Open (or create) the config file at:
-
-```
-~/Library/Application Support/Claude/claude_desktop_config.json
-```
-
-Paste this in. **Replace `/ABSOLUTE/PATH/TO/Video-editing-app`** with
-the real path on your Mac:
-
-```json
-{
-  "mcpServers": {
-    "roughcut": {
-      "command": "/ABSOLUTE/PATH/TO/Video-editing-app/.venv/bin/roughcut-mcp"
-    }
-  }
-}
-```
-
-**Quit Claude Desktop completely (Cmd-Q, not just close the window)
-and reopen it.** Open a new chat and click the tools / plug icon —
-you should see `roughcut` listed with seven tools.
-
-Step-by-step troubleshooting, Windows/Linux paths, and Claude Code
-setup are in [`docs/agent-setup.md`](docs/agent-setup.md).
+- macOS with Apple Silicon (M1 / M2 / M3 / M4). Intel Macs cannot run
+  local Whisper transcription.
+- Python 3.11+ on PATH. Recent macOS ships this; if you get a
+  "Python 3.11 not found" error, install it with one Terminal command:
+  ```
+  brew install python@3.11
+  ```
+  (one-time only; Homebrew install instructions at
+  <https://brew.sh> if you don't have it.)
+- Claude Desktop with a paid subscription (Pro / Team / Enterprise).
 
 ---
 
 ## 60-second "try it"
 
-Once the server is wired up, ask Claude in a new chat:
+Once installed, ask Claude in a new chat:
 
-> *"Use the `list_clips` tool on `/Users/you/some-video-folder` and
-> tell me what's there."*
-
-(Drag the folder from Finder into your chat to get the path.)
+> *"Use `get_project_paths` to check what I configured, then run
+> `list_clips` on the interview folder."*
 
 You should get back codec, duration, frame rate, resolution, and size
-for each video file in that folder.
+for each video file in that folder. If you skipped the user_config
+prompts at install time, drag the folder from Finder into chat to get
+its path.
 
 ---
 
 ## Build a full rough cut
 
 Open [`docs/example-workflow.md`](docs/example-workflow.md). Copy the
-prompt into a fresh Claude Desktop chat, replace the three or four
-paths with your real folder paths, and let the agent run.
+prompt into a fresh Claude Desktop chat and let the agent run.
 
 A 10-minute interview plus 30 b-roll clips takes roughly **5 minutes
 end-to-end** on an M-series Mac, mostly transcription. Reruns hit the
@@ -143,17 +81,18 @@ V2. Clips relink to source by absolute path.
 
 ---
 
-## The seven tools
+## The eight tools
 
-| Tool                       | What it does                                                 |
-| -------------------------- | ------------------------------------------------------------ |
-| `list_clips`               | Inventory a folder of video files (ffprobe).                 |
-| `transcribe_video`         | Local mlx-whisper transcription with word timestamps.        |
-| `cluster_takes_by_silence` | Group transcript segments by silence boundaries.             |
-| `align_takes_to_script`    | Fuzzy-match transcript segments against script lines.        |
-| `extract_frame_grid`       | Sample 16 frames from a clip, tile into a contact sheet.     |
-| `get_clip_thumbnail`       | One frame at a specific timecode.                            |
-| `generate_fcpxml`          | Write FCPXML v1.10 from a `SequenceSpec` the agent built.    |
+| Tool                       | What it does                                                       |
+| -------------------------- | ------------------------------------------------------------------ |
+| `get_project_paths`        | Return the interview / b-roll / script paths set at install time.  |
+| `list_clips`               | Inventory a folder of video files (ffprobe).                       |
+| `transcribe_video`         | Local mlx-whisper transcription with word timestamps.              |
+| `cluster_takes_by_silence` | Group transcript segments by silence boundaries.                   |
+| `align_takes_to_script`    | Fuzzy-match transcript segments against script lines.              |
+| `extract_frame_grid`       | Sample 16 frames from a clip, tile into a contact sheet.           |
+| `get_clip_thumbnail`       | One frame at a specific timecode.                                  |
+| `generate_fcpxml`          | Write FCPXML v1.10 from a `SequenceSpec` the agent built.          |
 
 The agent decides which to call and when. The
 [`docs/example-workflow.md`](docs/example-workflow.md) prompt
@@ -161,7 +100,7 @@ orchestrates them end-to-end.
 
 ---
 
-## What's NOT in v0.3
+## What's NOT in v0.4
 
 Music, color, audio mixing, multicam, speaker diarization, RAW formats
 (`.braw` / `.r3d` / `.ari` — transcode to ProRes/H.264 first). It's an
@@ -171,6 +110,25 @@ opinionated first draft. Expect to recut everything — that's the point.
 
 ## For developers
 
+If you want to hack on the Python source rather than install the
+shipped `.dxt`:
+
+```
+git clone https://github.com/jordanmilgrom/video-editing-app.git
+cd video-editing-app
+brew install ffmpeg python@3.11        # one-time
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+Then wire `.venv/bin/roughcut-mcp` into Claude Desktop manually via
+`~/Library/Application Support/Claude/claude_desktop_config.json`
+(see [`docs/agent-setup.md`](docs/agent-setup.md) for the JSON
+snippet).
+
+To rebuild `roughcut.dxt` from source, see [`BUILD.md`](BUILD.md).
+
 The architecture is documented in [`CLAUDE.md`](CLAUDE.md). The MCP
-boundary contract is in [`REFACTOR.md`](REFACTOR.md). Run tests with
-`pip install -e ".[dev]" && pytest`.
+boundary contract is in [`REFACTOR.md`](REFACTOR.md).

@@ -94,3 +94,30 @@ def test_build_server_registers_list_clips() -> None:
     tool_objs = asyncio.run(server.list_tools())
     names = {t.name for t in tool_objs}
     assert "list_clips" in names
+    assert "get_project_paths" in names
+
+
+def test_get_project_paths_reads_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROUGHCUT_INTERVIEW_DIR", "/abs/interviews")
+    monkeypatch.setenv("ROUGHCUT_BROLL_DIR", "/abs/broll")
+    monkeypatch.delenv("ROUGHCUT_SCRIPT_PATH", raising=False)
+    res = tools._get_project_paths()
+    assert res.ok is True
+    assert res.summary == {
+        "interview_folder": "/abs/interviews",
+        "broll_folder": "/abs/broll",
+        "script_path": None,
+    }
+
+
+def test_get_project_paths_all_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ROUGHCUT_INTERVIEW_DIR", raising=False)
+    monkeypatch.delenv("ROUGHCUT_BROLL_DIR", raising=False)
+    monkeypatch.delenv("ROUGHCUT_SCRIPT_PATH", raising=False)
+    res = tools._get_project_paths()
+    assert res.ok is True
+    assert res.summary == {
+        "interview_folder": None,
+        "broll_folder": None,
+        "script_path": None,
+    }

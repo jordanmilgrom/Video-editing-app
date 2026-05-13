@@ -13,3 +13,7 @@ dist/
 htmlcov/
 
 .roughcut-cache/
+
+# DXT build outputs — built by scripts/build-dxt.sh, shipped via GitHub Releases.
+dxt-build/
+*.dxt

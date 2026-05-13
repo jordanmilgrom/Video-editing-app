@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -77,6 +78,10 @@ def register_tools(mcp: FastMCP) -> None:
     def get_clip_thumbnail(video_path: str, timecode_sec: float) -> Any:
         """Returns `[Image, TextContent]` on success, `ToolResponse` on failure."""
         return _get_clip_thumbnail(video_path, timecode_sec)
+
+    @mcp.tool(description=desc.GET_PROJECT_PATHS)
+    def get_project_paths() -> ToolResponse:
+        return _get_project_paths()
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +215,14 @@ def _get_clip_thumbnail(video_path: str, timecode_sec: float) -> Any:
         return to_error(e)
     sidecar = json.dumps({"image_path": str(thumb_path), "timecode_sec": timecode_sec})
     return [Image(path=str(thumb_path)), TextContent(type="text", text=sidecar)]
+
+
+def _get_project_paths() -> ToolResponse:
+    return ToolResponse(
+        ok=True,
+        summary={
+            "interview_folder": os.environ.get("ROUGHCUT_INTERVIEW_DIR") or None,
+            "broll_folder": os.environ.get("ROUGHCUT_BROLL_DIR") or None,
+            "script_path": os.environ.get("ROUGHCUT_SCRIPT_PATH") or None,
+        },
+    )
