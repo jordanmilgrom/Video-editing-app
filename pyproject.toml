@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.7",
     "ffmpeg-python>=0.2.0",
     "Pillow>=10.3",
+    "mcp>=1.0",
     "mlx-whisper>=0.4 ; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 
@@ -22,6 +23,9 @@ dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
 ]
+
+[project.scripts]
+roughcut-mcp = "roughcut_mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["roughcut_core*", "roughcut_mcp*"]
