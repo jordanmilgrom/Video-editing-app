@@ -5,4 +5,4 @@ FCPXML. Agents drive reasoning by calling the MCP wrappers in
 `roughcut_mcp`, which delegate here.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

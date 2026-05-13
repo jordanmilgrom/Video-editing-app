@@ -1,215 +1,176 @@
 # roughcut
 
-**A first-draft video editor that runs on your Mac.** Point it at a folder of
-interview footage and a folder of b-roll clips, and it spits out a project
-file you can open in Premiere Pro (or DaVinci Resolve). Your best takes are
-on the main video track. Visually relevant b-roll is dropped on the track
-above, at the moments where it fits.
+**A first-draft video editor that runs from your AI agent.**
+
+You point your chat agent (Claude Desktop, Claude Code) at a folder of
+interview footage and a folder of b-roll clips. The agent picks the
+cleanest takes, decides where b-roll fits, and writes a Premiere /
+DaVinci Resolve project file. You open the file in your editor and
+take it from there.
 
 It is not finishing your edit. It is doing the first pass — the slow,
 tedious part — so you can start cutting from something instead of from
 nothing.
 
+This project ships as an **MCP server** with seven tools. The reasoning
+happens in your agent (using its subscription, not your API key); we
+just expose deterministic video capabilities: transcribe, cluster takes,
+contact-sheet frames, build FCPXML.
+
 ---
 
 ## What you need (one-time setup)
 
-You need a Mac with an Apple Silicon chip (M1, M2, M3, M4). The
-transcription engine doesn't work on Intel Macs.
+A Mac with Apple Silicon (M1 / M2 / M3 / M4). Local transcription does
+not work on Intel.
 
-You need three things installed. If you don't have them, the steps below
-walk through it.
+Three pieces of software, installed in this order:
 
 ### 1. Homebrew
 
-Homebrew is a tool for installing other tools. To install it, open the
-**Terminal** app (search for "Terminal" in Spotlight) and paste this in:
+Homebrew installs other tools. Open **Terminal** (search for it in
+Spotlight) and paste:
 
 ```
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-Follow the prompts. It will ask for your password.
+Follow the prompts.
 
-### 2. ffmpeg and Python
+### 2. ffmpeg and Python 3.11
 
-In Terminal, run:
+In the same Terminal:
 
 ```
 brew install ffmpeg python@3.11
 ```
 
-### 3. An Anthropic API key
+### 3. Claude Desktop
 
-This tool uses Claude (the AI). You need an API key, which is like a
-password that lets the tool talk to Claude on your behalf.
+Download from <https://claude.ai/download>. Sign in.
 
-- Go to https://console.anthropic.com/
-- Sign up or sign in.
-- Click "API Keys" in the left menu.
-- Click "Create Key", copy the long string that starts with `sk-ant-...`.
-
-You'll paste it into Terminal once, and it'll remember.
+(You don't need an Anthropic API key. Your Claude Desktop subscription
+pays for reasoning. roughcut does the deterministic work locally.)
 
 ---
 
-## Installing this tool
+## Install roughcut
 
-In Terminal, navigate to wherever you saved this project folder. For
-example, if it's on your Desktop:
+In Terminal, navigate to wherever this project lives — for example, if
+you saved it on your Desktop:
 
 ```
 cd ~/Desktop/Video-editing-app
 ```
 
-Then run:
+Then:
 
 ```
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e .
 ```
 
-That's it. The first command makes a private Python environment for this
-project. The second activates it. The third installs everything.
-
-To save your API key so the tool can use it:
+That's it. You now have a `roughcut-mcp` command inside
+`.venv/bin/`. Confirm it:
 
 ```
-echo 'export ANTHROPIC_API_KEY="sk-ant-paste-your-key-here"' >> ~/.zshrc
-source ~/.zshrc
+which roughcut-mcp
 ```
 
-(Replace `sk-ant-paste-your-key-here` with your actual key.)
+You should see an absolute path.
 
 ---
 
-## Running it
+## Wire roughcut into Claude Desktop
 
-Make two folders somewhere on your Mac:
-
-- **Interview folder**: your interview footage (e.g. `.mp4`, `.mov`, `.mxf`).
-- **B-roll folder**: all your b-roll clips.
-
-Then in Terminal (with the `.venv` activated — you'll see `(.venv)` in
-your prompt):
+Open (or create) the config file at:
 
 ```
-python -m roughcut \
-  --interview /path/to/interview/folder \
-  --broll     /path/to/broll/folder \
-  --output    /path/to/save/cut.fcpxml
+~/Library/Application Support/Claude/claude_desktop_config.json
 ```
 
-Drag the folders from Finder into Terminal to paste their paths.
+Paste this in. **Replace `/ABSOLUTE/PATH/TO/Video-editing-app`** with
+the real path on your Mac:
 
-If you have a script (the words the subject is supposed to say), add:
-
-```
-  --script /path/to/script.txt
-```
-
-The tool will print progress as it goes:
-
-```
-[1/5] Transcribing interview footage ...
-[2/5] Picking best takes ...
-[3/5] Analyzing b-roll ...
-[4/5] Matching b-roll to A-roll ...
-[5/5] Writing FCPXML ...
+```json
+{
+  "mcpServers": {
+    "roughcut": {
+      "command": "/ABSOLUTE/PATH/TO/Video-editing-app/.venv/bin/roughcut-mcp"
+    }
+  }
+}
 ```
 
-The first run on a 10-minute interview with 30 b-roll clips should finish
-in about 3-5 minutes on an M-series Mac. Running it again on the same
-footage takes seconds — it remembers what it already did.
+**Quit Claude Desktop completely (Cmd-Q, not just close the window)
+and reopen it.** Open a new chat and click the tools / plug icon —
+you should see `roughcut` listed with seven tools.
+
+Step-by-step troubleshooting, Windows/Linux paths, and Claude Code
+setup are in [`docs/agent-setup.md`](docs/agent-setup.md).
 
 ---
 
-## Opening the result
+## 60-second "try it"
 
-In Premiere Pro: **File → Import → choose `cut.fcpxml`**. A new sequence
-appears with your interview on V1 (the main video track) and b-roll on V2
-(stacked above). Your source media is referenced by absolute path, so the
-clips should appear without re-linking.
+Once the server is wired up, ask Claude in a new chat:
 
-In DaVinci Resolve: **File → Import Timeline → File → choose `cut.fcpxml`**.
+> *"Use the `list_clips` tool on `/Users/you/some-video-folder` and
+> tell me what's there."*
 
----
+(Drag the folder from Finder into your chat to get the path.)
 
-## What the flags mean
-
-| Flag | What it does |
-| ---- | ------------ |
-| `--interview` | Folder containing your interview video files. |
-| `--broll` | Folder containing your b-roll clips. |
-| `--output` | Where to save the result (give it a `.fcpxml` ending). |
-| `--script` | Optional. Path to a `.txt` of what the subject is supposed to say. Makes take detection more accurate. |
-| `--model` | Optional. Different transcription model. Default is the most accurate. Power users only. |
-| `--fps` | Optional. Output sequence frame rate. Default 23.976. |
-| `--cache-dir` | Optional. Where the tool saves its working files. Default is a hidden `.roughcut-cache` folder inside your project. |
+You should get back codec, duration, frame rate, resolution, and size
+for each video file in that folder.
 
 ---
 
-## Troubleshooting
+## Build a full rough cut
 
-**"Command not found: python"** — You need to activate the virtual
-environment. From the project folder, run `source .venv/bin/activate`.
-You'll see `(.venv)` appear in your prompt when it works.
+Open [`docs/example-workflow.md`](docs/example-workflow.md). Copy the
+prompt into a fresh Claude Desktop chat, replace the three or four
+paths with your real folder paths, and let the agent run.
 
-**"ANTHROPIC_API_KEY not set"** — Run the `echo 'export ...'` step from
-the installing section, with your real key, then **close and reopen
-Terminal**.
+A 10-minute interview plus 30 b-roll clips takes roughly **5 minutes
+end-to-end** on an M-series Mac, mostly transcription. Reruns hit the
+cache and are essentially free.
 
-**"ffmpeg not found on PATH"** — Run `brew install ffmpeg`.
-
-**Premiere says "media is offline"** — The FCPXML uses absolute paths.
-If you moved the source files after generating the FCPXML, run it again
-to update the paths.
-
-**It's slow** — The first run on each interview file is slow because
-transcription is real work. Reruns hit the cache. If you want to iterate
-on the b-roll matching without re-transcribing, just rerun the same
-command — only the matching step will repeat.
+Open the resulting `.fcpxml` in Premiere Pro
+(`File → Import → choose the file`) or DaVinci Resolve
+(`File → Import Timeline → File`). Interview audio sits on V1, b-roll on
+V2. Clips relink to source by absolute path.
 
 ---
 
-## What's happening under the hood
+## The seven tools
 
-(You don't need to read this. It's here so the next person who works on
-the code can find their way around.)
+| Tool                       | What it does                                                 |
+| -------------------------- | ------------------------------------------------------------ |
+| `list_clips`               | Inventory a folder of video files (ffprobe).                 |
+| `transcribe_video`         | Local mlx-whisper transcription with word timestamps.        |
+| `cluster_takes_by_silence` | Group transcript segments by silence boundaries.             |
+| `align_takes_to_script`    | Fuzzy-match transcript segments against script lines.        |
+| `extract_frame_grid`       | Sample 16 frames from a clip, tile into a contact sheet.     |
+| `get_clip_thumbnail`       | One frame at a specific timecode.                            |
+| `generate_fcpxml`          | Write FCPXML v1.10 from a `SequenceSpec` the agent built.    |
 
-```
-roughcut/
-  cli.py          The command-line entrypoint. Just orchestrates.
-  transcribe.py   ffmpeg pulls the audio. mlx-whisper transcribes it.
-  takes.py        Splits the transcript into reads of the same line.
-                  Claude picks the cleanest read.
-  broll.py        Pulls 16 frames from each clip, tiles them into a
-                  contact sheet, shows it to Claude vision, gets back
-                  subject/motion/mood/tags.
-  match.py        Walks the chosen interview sentence by sentence and
-                  asks Claude which b-roll clip(s) would visually
-                  support each line.
-  fcpxml.py       Writes the result as an FCPXML file Premiere/Resolve
-                  can open.
-  models.py       Type definitions everything else uses.
-  claude.py       The Anthropic API client wrapper.
-  prompts/        All the instructions sent to Claude live here as
-                  Markdown files — easy to read and edit without
-                  touching Python.
-```
-
-The pipeline is `transcribe → takes → b-roll → match → fcpxml`. Each
-stage caches its outputs to `.roughcut-cache/`, so re-running is cheap.
+The agent decides which to call and when. The
+[`docs/example-workflow.md`](docs/example-workflow.md) prompt
+orchestrates them end-to-end.
 
 ---
 
-## Limits of v1
+## What's NOT in v0.3
 
-- Doesn't do music, color, audio mixing, or any other "finishing" work.
-- Doesn't handle multicam.
-- Doesn't separate speakers — assumes one subject.
-- RAW formats (`.braw`, `.r3d`, `.ari`) aren't supported yet. Transcode
-  to ProRes or H.264 first.
-- It's an opinionated first draft. Expect to recut everything. That's
-  the point — start from a draft, not a blank timeline.
+Music, color, audio mixing, multicam, speaker diarization, RAW formats
+(`.braw` / `.r3d` / `.ari` — transcode to ProRes/H.264 first). It's an
+opinionated first draft. Expect to recut everything — that's the point.
+
+---
+
+## For developers
+
+The architecture is documented in [`CLAUDE.md`](CLAUDE.md). The MCP
+boundary contract is in [`REFACTOR.md`](REFACTOR.md). Run tests with
+`pip install -e ".[dev]" && pytest`.

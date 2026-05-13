@@ -81,15 +81,16 @@ def _probe_duration(media_path: Path) -> float:
     return float(out.stdout.strip() or 0.0)
 
 
-def _run_whisper(wav_path: Path, model: str = DEFAULT_WHISPER_MODEL) -> dict:
+def _run_whisper(
+    wav_path: Path, model: str = DEFAULT_WHISPER_MODEL, language: str | None = None
+) -> dict:
     """Run mlx-whisper. Imported lazily; tests monkeypatch this function."""
     import mlx_whisper  # type: ignore[import-not-found]
 
-    return mlx_whisper.transcribe(
-        str(wav_path),
-        path_or_hf_repo=model,
-        word_timestamps=True,
-    )
+    kwargs: dict = {"path_or_hf_repo": model, "word_timestamps": True}
+    if language:
+        kwargs["language"] = language
+    return mlx_whisper.transcribe(str(wav_path), **kwargs)
 
 
 def _parse_whisper_result(raw: dict, source_path: Path, source_hash: str, duration: float) -> Transcript:
@@ -117,8 +118,17 @@ def _parse_whisper_result(raw: dict, source_path: Path, source_hash: str, durati
     )
 
 
-def transcribe(media_path: Path, cache_dir: Path, model: str = DEFAULT_WHISPER_MODEL) -> Transcript:
-    """Transcribe a single media file, hitting cache when available."""
+def transcribe(
+    media_path: Path,
+    cache_dir: Path,
+    model: str = DEFAULT_WHISPER_MODEL,
+    language: str | None = None,
+) -> Transcript:
+    """Transcribe a single media file, hitting cache when available.
+
+    `language` is a 2-letter code (e.g. "en") forwarded to mlx-whisper.
+    When None, Whisper auto-detects.
+    """
     media_path = Path(media_path)
     key = cache_key(media_path)
     cache_file = _cache_path(cache_dir, key, model)
@@ -128,7 +138,7 @@ def transcribe(media_path: Path, cache_dir: Path, model: str = DEFAULT_WHISPER_M
     with tempfile.TemporaryDirectory() as tmpdir:
         wav = Path(tmpdir) / "audio.wav"
         extract_audio(media_path, wav)
-        raw = _run_whisper(wav, model=model)
+        raw = _run_whisper(wav, model=model, language=language)
 
     duration = _probe_duration(media_path)
     transcript = _parse_whisper_result(raw, media_path, key, duration)
@@ -137,14 +147,17 @@ def transcribe(media_path: Path, cache_dir: Path, model: str = DEFAULT_WHISPER_M
 
 
 def transcribe_folder(
-    interview_dir: Path, cache_dir: Path, model: str = DEFAULT_WHISPER_MODEL
+    interview_dir: Path,
+    cache_dir: Path,
+    model: str = DEFAULT_WHISPER_MODEL,
+    language: str | None = None,
 ) -> list[Transcript]:
     """Transcribe every supported media file in a folder, sorted by name."""
     files = sorted(
         p for p in Path(interview_dir).iterdir()
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
     )
-    return [transcribe(f, cache_dir, model=model) for f in files]
+    return [transcribe(f, cache_dir, model=model, language=language) for f in files]
 
 
 __all__ = [

@@ -5,4 +5,4 @@ heavy lifting is delegated to `roughcut_core`. Tool wrappers here only
 validate inputs, call core, and shape responses.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

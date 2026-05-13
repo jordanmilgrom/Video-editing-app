@@ -1,9 +1,8 @@
 """Pydantic v2 data models — the shared contract across roughcut_core.
 
-Deterministic primitives only. No AI-derived fields on new models.
-`Take` / `Clip` / `BrollMatch` / `Sequence` are retained for now because
-`fcpxml.py` still consumes them; they will be folded into `SequenceSpec`
-in Phase C.
+Every model here is deterministic. AI-derived fields live on no model
+because there is no AI in this codebase; the agent assembles
+`SequenceSpec` from its own decisions and hands it to `generate_fcpxml`.
 """
 
 from __future__ import annotations
@@ -80,50 +79,39 @@ class ClipMeta(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Legacy models still consumed by fcpxml.py. Slated for Phase C consolidation
-# into a single `SequenceSpec` provided by the agent.
+# Final timeline contract. Built by the agent; consumed by fcpxml.write_fcpxml.
 # ---------------------------------------------------------------------------
 
 
-class Take(BaseModel):
+class ARollSegment(BaseModel):
+    """One contiguous interview clip on V1. Always 'chosen' by definition."""
+
     source_path: Path
-    source_hash: str
     in_sec: NonNegativeFloat
     out_sec: NonNegativeFloat
-    text: str
-    cluster_id: str
-    chosen: bool = True
-    reason: str = ""
 
 
-class Clip(BaseModel):
+class BRollInsert(BaseModel):
+    """One b-roll insert on V2 attached to the assembled A-roll timeline."""
+
     source_path: Path
-    source_hash: str
-    duration: NonNegativeFloat
-    subject: str = ""
-    motion: str = ""
-    mood: str = ""
-    tags: list[str] = Field(default_factory=list)
-    suggested_in_sec: NonNegativeFloat = 0.0
-    suggested_out_sec: NonNegativeFloat = 0.0
-    description: str = ""
-
-
-class BrollMatch(BaseModel):
-    sentence_index: int
-    sentence_text: str
-    clip_hash: str
     clip_in_sec: NonNegativeFloat
     clip_out_sec: NonNegativeFloat
     aroll_offset_sec: NonNegativeFloat
-    reason: str = ""
 
 
-class Sequence(BaseModel):
+class SequenceSpec(BaseModel):
+    """Everything `generate_fcpxml` needs to emit a Premiere/Resolve FCPXML.
+
+    The agent assembles this from its take and b-roll decisions. A-roll
+    segments are laid out contiguously on the spine in list order;
+    b-roll inserts are placed by `aroll_offset_sec` (relative to the
+    start of the assembled A-roll, not to any individual segment).
+    """
+
     name: str = "roughcut"
-    frame_rate: float = 23.976
+    fps: float = 23.976
     width: int = 1920
     height: int = 1080
-    takes: list[Take] = Field(default_factory=list)
-    broll: list[BrollMatch] = Field(default_factory=list)
-    clips: dict[str, Clip] = Field(default_factory=dict)
+    aroll: list[ARollSegment]
+    broll: list[BRollInsert] = Field(default_factory=list)

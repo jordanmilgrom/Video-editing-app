@@ -48,7 +48,7 @@ def _frame_timestamps(duration: float, n: int = NUM_FRAMES) -> list[float]:
     return [round(start + i * step, 3) for i in range(n)]
 
 
-def _extract_frame(media_path: Path, timestamp: float, out_path: Path) -> None:
+def extract_frame(media_path: Path, timestamp: float, out_path: Path) -> None:
     """Hybrid seek: fast to ~1s before target, then accurate the rest.
 
     Fast-only seeking misses the tail of short clips (lands on the prior
@@ -66,6 +66,10 @@ def _extract_frame(media_path: Path, timestamp: float, out_path: Path) -> None:
         str(out_path),
     ]
     subprocess.run(cmd, check=True)
+
+
+# Backwards-compat alias used inside this module.
+_extract_frame = extract_frame
 
 
 def build_contact_sheet(

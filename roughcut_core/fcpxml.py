@@ -12,8 +12,10 @@ fcpxml
       asset-clip lane=1  # b-roll on V2, nested inside its A-roll parent
 ```
 
-All times are rational fractions snapped to the sequence frame rate so
-Premiere and Resolve relink cleanly.
+Times are rational fractions snapped to the sequence frame rate so
+Premiere and Resolve relink cleanly. Asset durations are derived from
+the maximum referenced out-point per source — accurate enough for the
+editor to scrub, and keeps this module ffmpeg-free.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import xml.etree.ElementTree as ET
 from math import gcd
 from pathlib import Path
 
-from roughcut_core.models import Sequence
+from roughcut_core.models import SequenceSpec
 
 _FPS_TABLE = {
     23.976: (24000, 1001),
@@ -36,27 +38,26 @@ _FPS_TABLE = {
 }
 
 
-def write_fcpxml(sequence: Sequence, output_path: Path) -> None:
-    fps_num, fps_den = _fps_rational(sequence.frame_rate)
+def write_fcpxml(spec: SequenceSpec, output_path: Path) -> None:
+    fps_num, fps_den = _fps_rational(spec.fps)
     fcpxml = ET.Element("fcpxml", {"version": "1.10"})
 
     resources = ET.SubElement(fcpxml, "resources")
     ET.SubElement(resources, "format", {
         "id": "r0",
-        "name": _format_name(sequence.frame_rate, sequence.height),
+        "name": _format_name(spec.fps, spec.height),
         "frameDuration": f"{fps_den}/{fps_num}s",
-        "width": str(sequence.width),
-        "height": str(sequence.height),
+        "width": str(spec.width),
+        "height": str(spec.height),
     })
 
-    asset_ids = _emit_assets(resources, sequence, fps_num, fps_den)
+    asset_ids = _emit_assets(resources, spec, fps_num, fps_den)
 
     library = ET.SubElement(fcpxml, "library")
-    event = ET.SubElement(library, "event", {"name": sequence.name})
-    project = ET.SubElement(event, "project", {"name": sequence.name})
+    event = ET.SubElement(library, "event", {"name": spec.name})
+    project = ET.SubElement(event, "project", {"name": spec.name})
 
-    aroll_takes = [tk for tk in sequence.takes if tk.chosen]
-    total_dur = sum(tk.out_sec - tk.in_sec for tk in aroll_takes)
+    total_dur = sum(seg.out_sec - seg.in_sec for seg in spec.aroll)
     seq_elem = ET.SubElement(project, "sequence", {
         "format": "r0",
         "duration": _t(total_dur, fps_num, fps_den),
@@ -68,69 +69,65 @@ def write_fcpxml(sequence: Sequence, output_path: Path) -> None:
     spine = ET.SubElement(seq_elem, "spine")
 
     cursor = 0.0
-    for tk in aroll_takes:
-        aid = asset_ids[tk.source_path]
-        dur = tk.out_sec - tk.in_sec
+    for seg in spec.aroll:
+        aid = asset_ids[seg.source_path]
+        dur = seg.out_sec - seg.in_sec
         clip = ET.SubElement(spine, "asset-clip", {
             "ref": aid,
             "offset": _t(cursor, fps_num, fps_den),
-            "name": tk.source_path.stem,
-            "start": _t(tk.in_sec, fps_num, fps_den),
+            "name": seg.source_path.stem,
+            "start": _t(seg.in_sec, fps_num, fps_den),
             "duration": _t(dur, fps_num, fps_den),
             "tcFormat": "NDF",
         })
-        _attach_broll(clip, sequence, asset_ids, cursor, dur, fps_num, fps_den)
+        _attach_broll(clip, spec, asset_ids, cursor, dur, fps_num, fps_den)
         cursor += dur
 
     _write(fcpxml, output_path)
 
 
-def _attach_broll(parent: ET.Element, sequence: Sequence, asset_ids: dict[Path, str],
+def _attach_broll(parent: ET.Element, spec: SequenceSpec, asset_ids: dict[Path, str],
                   base_offset: float, parent_dur: float, fps_num: int, fps_den: int) -> None:
     """Nest b-roll asset-clips on lane 1 of the A-roll clip they fall inside."""
-    for m in sequence.broll:
-        if not (base_offset <= m.aroll_offset_sec < base_offset + parent_dur):
+    for ins in spec.broll:
+        if not (base_offset <= ins.aroll_offset_sec < base_offset + parent_dur):
             continue
-        clip_meta = sequence.clips.get(m.clip_hash)
-        if clip_meta is None:
-            continue
-        broll_aid = asset_ids.get(clip_meta.source_path)
+        broll_aid = asset_ids.get(ins.source_path)
         if broll_aid is None:
             continue
-        local_offset = m.aroll_offset_sec - base_offset
-        bduration = max(0.0, m.clip_out_sec - m.clip_in_sec)
+        local_offset = ins.aroll_offset_sec - base_offset
+        bduration = max(0.0, ins.clip_out_sec - ins.clip_in_sec)
         if bduration <= 0:
             continue
         ET.SubElement(parent, "asset-clip", {
             "ref": broll_aid,
             "lane": "1",
             "offset": _t(local_offset, fps_num, fps_den),
-            "name": clip_meta.source_path.stem,
-            "start": _t(m.clip_in_sec, fps_num, fps_den),
+            "name": ins.source_path.stem,
+            "start": _t(ins.clip_in_sec, fps_num, fps_den),
             "duration": _t(bduration, fps_num, fps_den),
         })
 
 
-def _emit_assets(resources: ET.Element, sequence: Sequence,
+def _emit_assets(resources: ET.Element, spec: SequenceSpec,
                  fps_num: int, fps_den: int) -> dict[Path, str]:
     """Register one <asset> per unique source path. Returns {path: asset_id}."""
     paths: list[Path] = []
     seen: set[Path] = set()
-    for tk in sequence.takes:
-        if tk.chosen and tk.source_path not in seen:
-            seen.add(tk.source_path)
-            paths.append(tk.source_path)
-    for m in sequence.broll:
-        c = sequence.clips.get(m.clip_hash)
-        if c and c.source_path not in seen:
-            seen.add(c.source_path)
-            paths.append(c.source_path)
+    for seg in spec.aroll:
+        if seg.source_path not in seen:
+            seen.add(seg.source_path)
+            paths.append(seg.source_path)
+    for ins in spec.broll:
+        if ins.source_path not in seen:
+            seen.add(ins.source_path)
+            paths.append(ins.source_path)
 
     asset_ids: dict[Path, str] = {}
     for i, path in enumerate(paths, start=1):
         aid = f"r{i}"
         asset_ids[path] = aid
-        dur = _asset_duration(path, sequence)
+        dur = _asset_duration(path, spec)
         ET.SubElement(resources, "asset", {
             "id": aid,
             "name": path.stem,
@@ -148,13 +145,11 @@ def _emit_assets(resources: ET.Element, sequence: Sequence,
     return asset_ids
 
 
-def _asset_duration(path: Path, sequence: Sequence) -> float:
-    for c in sequence.clips.values():
-        if c.source_path == path:
-            return c.duration
-    return max(
-        (tk.out_sec for tk in sequence.takes if tk.source_path == path), default=60.0,
-    )
+def _asset_duration(path: Path, spec: SequenceSpec) -> float:
+    """Pick the largest out-point referenced for this source (a-roll or b-roll)."""
+    candidates = [seg.out_sec for seg in spec.aroll if seg.source_path == path]
+    candidates += [ins.clip_out_sec for ins in spec.broll if ins.source_path == path]
+    return max(candidates, default=60.0)
 
 
 def _fps_rational(fps: float) -> tuple[int, int]:
