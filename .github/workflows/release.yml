@@ -1,0 +1,56 @@
+# Build roughcut.dxt and attach it to a GitHub Release on every vX.Y.Z tag.
+#
+# Pushing a tag like `v0.5.0` triggers this workflow. It runs the same
+# `scripts/build-dxt.sh` developers run locally, and uploads the resulting
+# `roughcut.dxt` as a release asset. The Release is auto-created if it
+# doesn't already exist (e.g., a tag pushed without using `gh release create`).
+#
+# To cut a new release:
+#   1. Bump `version` in dxt/manifest.json AND pyproject.toml (lockstep).
+#   2. Commit + push to main.
+#   3. `git tag v0.X.Y && git push origin v0.X.Y` (or use gh release create).
+#
+# The runner is ubuntu-latest because build-dxt.sh cross-builds for darwin/arm64
+# (wheels are downloaded with explicit --platform macosx_*_arm64 tags, ffmpeg
+# comes from npm pre-built, python-build-standalone is a pre-built tarball).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python (build host only — the .dxt bundles its own runtime)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node (for the @anthropic-ai/dxt CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build roughcut.dxt
+        run: bash scripts/build-dxt.sh
+
+      - name: Confirm artifact + show size
+        run: |
+          test -f roughcut.dxt
+          ls -lh roughcut.dxt
+
+      - name: Create GitHub Release and upload .dxt
+        uses: softprops/action-gh-release@v2
+        with:
+          files: roughcut.dxt
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -115,3 +115,45 @@ class SequenceSpec(BaseModel):
     height: int = 1080
     aroll: list[ARollSegment]
     broll: list[BRollInsert] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Multicam mode (podcast / multi-camera, parallel recordings)
+# ---------------------------------------------------------------------------
+
+
+class MulticamGroup(BaseModel):
+    """A set of clips that were rolling simultaneously, with discovered offsets.
+
+    `offsets_sec[i]` is the time of `clip_paths[i]` relative to the
+    earliest clip in the group (which has offset 0.0). So if camera B
+    started recording 3.2s after camera A, A's offset is 0.0 and B's is
+    3.2 (or the agent can interpret this as "B's t=0 happens at A's
+    t=3.2"). Confidence is a 0..1 measure of how clean the audio-sync
+    cross-correlation was.
+    """
+
+    group_id: str
+    clip_paths: list[Path]
+    offsets_sec: list[float]
+    confidence: float = 1.0
+
+
+class SpeakerLabel(BaseModel):
+    """Per-segment speaker assignment for a multicam transcript."""
+
+    segment_idx: int
+    speaker_idx: int          # index into the group's clip list
+    speaker_label: str        # e.g. "Speaker 1" or user-supplied
+    rms_per_clip: list[float] # raw mic RMS readings, parallel to clip list
+
+
+class AngleSelection(BaseModel):
+    """One angle (one camera) covering one slice of the assembled timeline."""
+
+    timeline_in_sec: NonNegativeFloat
+    timeline_out_sec: NonNegativeFloat
+    clip_path: Path
+    clip_in_sec: NonNegativeFloat
+    clip_out_sec: NonNegativeFloat
+    reason: str = ""          # e.g. "primary" or "reaction"

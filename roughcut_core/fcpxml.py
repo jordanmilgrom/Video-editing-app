@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from math import gcd
 from pathlib import Path
 
-from roughcut_core.models import SequenceSpec
+from roughcut_core.models import AngleSelection, SequenceSpec
 
 _FPS_TABLE = {
     23.976: (24000, 1001),
@@ -190,3 +190,77 @@ def _write(root: ET.Element, output_path: Path) -> None:
         '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n' + body + "\n",
         encoding="utf-8",
     )
+
+
+def write_multicam_fcpxml(
+    selections: list[AngleSelection],
+    output_path: Path,
+    *,
+    name: str = "roughcut-multicam",
+    fps: float = 23.976,
+    width: int = 1920,
+    height: int = 1080,
+) -> None:
+    """Emit a flat V1 sequence with one asset-clip per angle decision.
+
+    This is intentionally NOT a true `<mc-clip>` multicam element — the
+    agent has already picked angles, so we lay them out as straight cuts
+    Premiere/Resolve can scrub. Editors who want to re-pick angles in
+    the NLE can re-link sources after import.
+    """
+    if not selections:
+        raise ValueError("write_multicam_fcpxml: selections is empty")
+    fps_num, fps_den = _fps_rational(fps)
+    fcpxml = ET.Element("fcpxml", {"version": "1.10"})
+    resources = ET.SubElement(fcpxml, "resources")
+    ET.SubElement(resources, "format", {
+        "id": "r0",
+        "name": _format_name(fps, height),
+        "frameDuration": f"{fps_den}/{fps_num}s",
+        "width": str(width),
+        "height": str(height),
+    })
+
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for s in selections:
+        if s.clip_path not in seen:
+            seen.add(s.clip_path)
+            paths.append(s.clip_path)
+    asset_ids: dict[Path, str] = {}
+    for i, p in enumerate(paths, start=1):
+        aid = f"r{i}"
+        asset_ids[p] = aid
+        dur = max(s.clip_out_sec for s in selections if s.clip_path == p)
+        ET.SubElement(resources, "asset", {
+            "id": aid, "name": Path(p).stem, "src": Path(p).resolve().as_uri(),
+            "start": "0s", "duration": _t(dur, fps_num, fps_den),
+            "hasVideo": "1", "hasAudio": "1", "format": "r0",
+            "videoSources": "1", "audioSources": "1",
+            "audioChannels": "2", "audioRate": "48000",
+        })
+
+    library = ET.SubElement(fcpxml, "library")
+    event = ET.SubElement(library, "event", {"name": name})
+    project = ET.SubElement(event, "project", {"name": name})
+    total = max(s.timeline_out_sec for s in selections)
+    seq_elem = ET.SubElement(project, "sequence", {
+        "format": "r0",
+        "duration": _t(total, fps_num, fps_den),
+        "tcStart": "0s", "tcFormat": "NDF",
+        "audioLayout": "stereo", "audioRate": "48k",
+    })
+    spine = ET.SubElement(seq_elem, "spine")
+    for s in selections:
+        dur = s.timeline_out_sec - s.timeline_in_sec
+        if dur <= 0:
+            continue
+        ET.SubElement(spine, "asset-clip", {
+            "ref": asset_ids[s.clip_path],
+            "offset": _t(s.timeline_in_sec, fps_num, fps_den),
+            "name": f"{Path(s.clip_path).stem} ({s.reason})",
+            "start": _t(s.clip_in_sec, fps_num, fps_den),
+            "duration": _t(dur, fps_num, fps_den),
+            "tcFormat": "NDF",
+        })
+    _write(fcpxml, output_path)

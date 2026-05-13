@@ -31,15 +31,19 @@ def test_transcribe_video_rejects_missing_file(tmp_path: Path) -> None:
 
 
 @requires_ffmpeg
-def test_transcribe_video_returns_transcript(tmp_path: Path, tiny_wav: Path, monkeypatch) -> None:
+def test_transcribe_video_returns_summary_with_transcript_path(
+    tmp_path: Path, tiny_wav: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(transcribe, "_run_whisper",
                         lambda p, model="", language=None: FAKE_OUTPUT)
     cache = tmp_path / "cache"
     res = tools._transcribe_video(str(tiny_wav), "auto", transcribe.DEFAULT_WHISPER_MODEL, str(cache))
     assert res.ok is True and res.error is None
-    assert res.transcript is not None
-    assert res.transcript.language == "en"
-    assert res.transcript.segments[0].text == "Hello world."
+    summary = res.summary or {}
+    assert summary["language"] == "en"
+    assert summary["segment_count"] == 1
+    assert "Hello world." in summary["first_200_chars"]
+    assert Path(summary["transcript_path"]).is_file()
 
 
 @requires_ffmpeg

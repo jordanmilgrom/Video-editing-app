@@ -43,8 +43,11 @@ step "Checking for Homebrew"
 if command -v brew >/dev/null 2>&1; then
   echo "Homebrew already installed: $(brew --version | head -1)"
 else
-  echo "Installing Homebrew (you'll be prompted for your password)…"
-  NONINTERACTIVE=1 /bin/bash -c \
+  echo "Installing Homebrew (Terminal will ask for your Mac password)…"
+  # Run interactively so sudo can prompt over the tty. With NONINTERACTIVE=1
+  # the installer bails with "Need sudo access" on a clean Mac because no
+  # auth path is available.
+  /bin/bash -c \
     "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 fi
 # Make brew + its installed binaries available in THIS shell.
@@ -82,9 +85,15 @@ fi
 # ----- Fetch source ----------------------------------------------------------
 step "Fetching roughcut source ($REPO_DIR)"
 if [ -d "$REPO_DIR/.git" ]; then
-  echo "Repo exists, pulling latest main…"
   cd "$REPO_DIR"
-  git pull origin main
+  echo "Repo exists at $REPO_DIR; resetting to latest origin/main…"
+  # Hard-reset rather than `git pull origin main` so divergent local history
+  # (from prior install.sh runs that committed local edits, or an aborted
+  # rebase) doesn't block the upgrade. The installer is not a place for
+  # preserving local mods — anyone hacking on the source uses a separate
+  # checkout per the "For developers" section of the README.
+  git fetch origin main
+  git reset --hard origin/main
 elif [ -d "$REPO_DIR" ]; then
   echo "$REPO_DIR exists but is not a git checkout. Move it aside and re-run." >&2
   exit 1

@@ -100,7 +100,9 @@ def build_contact_sheet(
             sheet.paste(img, (col * CELL_W, row * CELL_H))
             if overlay_timecodes and font is not None:
                 _label_cell(draw, font, f"{t:.2f}s", col * CELL_W + 8, row * CELL_H + 6)
-    sheet.save(out_path, format="PNG")
+    # JPEG (not PNG) and a quality cap, so the encoded sheet stays well
+    # under Claude Desktop's 1 MB tool-result cap when sent inline.
+    sheet.save(out_path, format="JPEG", quality=75, optimize=True)
     return timestamps
 
 

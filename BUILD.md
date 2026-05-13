@@ -52,10 +52,23 @@ come pre-built. The resulting `.dxt` only runs on macOS arm64, though.
 The `.dxt` is **not** committed to the repo (it's gitignored). Cut a
 GitHub Release and upload `roughcut.dxt` as an asset:
 
+**Automated (preferred).** Push a `vX.Y.Z` tag and
+`.github/workflows/release.yml` builds the `.dxt` on a GitHub-hosted
+runner and uploads it to the release:
+
 ```
-gh release create v0.4.0 \
-  --title "roughcut v0.4.0" \
-  --notes "First .dxt release. macOS arm64 only." \
+# bump dxt/manifest.json and pyproject.toml first
+git tag v0.5.0
+git push origin v0.5.0
+```
+
+**Manual fallback (if CI is down).**
+
+```
+bash scripts/build-dxt.sh
+gh release create v0.5.0 \
+  --title "roughcut v0.5.0" \
+  --notes "Size-bounded returns, multicam podcast mode, CI release workflow." \
   roughcut.dxt
 ```
 

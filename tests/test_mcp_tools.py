@@ -1,12 +1,14 @@
 """Tests for the MCP tool layer.
 
-The implementation function `_list_clips` is exercised directly so we
-don't have to spin up the stdio server. A separate test verifies that
-`build_server()` registers the tool by name.
+Impl functions `_*` are exercised directly so tests don't have to spin
+up the stdio server. A separate test verifies `build_server()` registers
+every expected tool by name. Cache-dir is isolated per test via the
+`ROUGHCUT_CACHE_DIR` env var so writes don't bleed into the real cache.
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -35,15 +37,21 @@ def _make_audio_only(path: Path, *, duration: int = 1) -> None:
     )
 
 
-def test_list_clips_rejects_relative_path() -> None:
+@pytest.fixture
+def isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    cdir = tmp_path / "cache"
+    monkeypatch.setenv("ROUGHCUT_CACHE_DIR", str(cdir))
+    return cdir
+
+
+def test_list_clips_rejects_relative_path(isolated_cache: Path) -> None:
     res = tools._list_clips("./relative/path", True)
     assert res.ok is False
     assert res.error == "relative_path"
-    assert res.clips == []
-    assert "relative" in (res.message or "").lower() or "./relative" in (res.message or "")
+    assert (res.summary or {}).get("clip_count", 0) == 0
 
 
-def test_list_clips_rejects_nonexistent_folder(tmp_path: Path) -> None:
+def test_list_clips_rejects_nonexistent_folder(tmp_path: Path, isolated_cache: Path) -> None:
     missing = tmp_path / "does_not_exist"
     res = tools._list_clips(str(missing), True)
     assert res.ok is False
@@ -51,29 +59,33 @@ def test_list_clips_rejects_nonexistent_folder(tmp_path: Path) -> None:
 
 
 @requires_ffmpeg
-def test_list_clips_returns_clip_metadata(tmp_path: Path) -> None:
+def test_list_clips_writes_full_payload_to_disk(tmp_path: Path, isolated_cache: Path) -> None:
     _make_clip(tmp_path / "shot.mp4", duration=2, rate=24, size="320x240")
     res = tools._list_clips(str(tmp_path), True)
     assert res.ok is True and res.error is None
-    assert len(res.clips) == 1
-    meta = res.clips[0]
-    assert meta.path.name == "shot.mp4"
-    assert (meta.width, meta.height) == (320, 240)
-    assert meta.fps == pytest.approx(24.0, abs=0.01)
+    summary = res.summary or {}
+    assert summary["clip_count"] == 1
+    assert summary["clip_paths"][0].endswith("shot.mp4")
+    clips_path = Path(summary["clips_path"])
+    assert clips_path.is_file()
+    payload = json.loads(clips_path.read_text())
+    assert len(payload) == 1
+    assert payload[0]["width"] == 320 and payload[0]["height"] == 240
 
 
 @requires_ffmpeg
-def test_list_clips_audio_only_returns_invalid_clip_envelope(tmp_path: Path) -> None:
+def test_list_clips_audio_only_returns_invalid_clip_envelope(
+    tmp_path: Path, isolated_cache: Path
+) -> None:
     _make_audio_only(tmp_path / "audio_only.mp4")
     res = tools._list_clips(str(tmp_path), True)
-    # Core raises ValueError("No video stream in ...") which the MCP
-    # wrapper maps to the structured envelope, NOT a raised exception.
     assert res.ok is False
     assert res.error == "invalid_clip"
-    assert "video stream" in (res.message or "").lower()
 
 
-def test_list_clips_recursive_flag_is_forwarded(tmp_path: Path, monkeypatch) -> None:
+def test_list_clips_recursive_flag_is_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_cache: Path
+) -> None:
     captured: dict = {}
 
     def fake_list_clips(folder, recursive=True):
@@ -86,38 +98,32 @@ def test_list_clips_recursive_flag_is_forwarded(tmp_path: Path, monkeypatch) -> 
     assert captured == {"folder": tmp_path, "recursive": False}
 
 
-def test_build_server_registers_list_clips() -> None:
+def test_build_server_registers_expected_tools() -> None:
     server = build_server()
-    # FastMCP keeps tools accessible via its async list_tools() method.
     import asyncio
-
     tool_objs = asyncio.run(server.list_tools())
     names = {t.name for t in tool_objs}
-    assert "list_clips" in names
+    # Doc-mode tools
+    assert {"list_clips", "transcribe_video", "cluster_takes_by_silence",
+            "align_takes_to_script", "generate_fcpxml",
+            "extract_frame_grid", "get_clip_thumbnail"}.issubset(names)
+    # Multicam tools
+    assert {"detect_multicam_groups", "diarize_speakers",
+            "pick_angle_per_segment", "generate_multicam_fcpxml"}.issubset(names)
+    # Meta
     assert "get_project_paths" in names
 
 
-def test_get_project_paths_reads_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_project_paths_includes_cache_dir(
+    monkeypatch: pytest.MonkeyPatch, isolated_cache: Path
+) -> None:
     monkeypatch.setenv("ROUGHCUT_INTERVIEW_DIR", "/abs/interviews")
-    monkeypatch.setenv("ROUGHCUT_BROLL_DIR", "/abs/broll")
-    monkeypatch.delenv("ROUGHCUT_SCRIPT_PATH", raising=False)
-    res = tools._get_project_paths()
-    assert res.ok is True
-    assert res.summary == {
-        "interview_folder": "/abs/interviews",
-        "broll_folder": "/abs/broll",
-        "script_path": None,
-    }
-
-
-def test_get_project_paths_all_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ROUGHCUT_INTERVIEW_DIR", raising=False)
     monkeypatch.delenv("ROUGHCUT_BROLL_DIR", raising=False)
     monkeypatch.delenv("ROUGHCUT_SCRIPT_PATH", raising=False)
     res = tools._get_project_paths()
     assert res.ok is True
-    assert res.summary == {
-        "interview_folder": None,
-        "broll_folder": None,
-        "script_path": None,
-    }
+    s = res.summary or {}
+    assert s["interview_folder"] == "/abs/interviews"
+    assert s["broll_folder"] is None
+    assert s["script_path"] is None
+    assert s["cache_dir"] == str(isolated_cache)
