@@ -49,7 +49,7 @@ def test_cache_key_changes_with_mtime(tmp_path: Path) -> None:
 def test_transcribe_runs_and_caches(tmp_path: Path, tiny_wav: Path, monkeypatch) -> None:
     calls = {"n": 0}
 
-    def fake_whisper(wav_path: Path) -> dict:
+    def fake_whisper(wav_path: Path, model: str = "") -> dict:
         calls["n"] += 1
         assert wav_path.exists()
         return FAKE_WHISPER_OUTPUT
@@ -67,7 +67,8 @@ def test_transcribe_runs_and_caches(tmp_path: Path, tiny_wav: Path, monkeypatch)
     assert t.duration > 0.0
     assert calls["n"] == 1
 
-    cached_file = cache_dir / "transcripts" / f"{transcribe.cache_key(tiny_wav)}.json"
+    safe_model = transcribe.DEFAULT_WHISPER_MODEL.replace("/", "_")
+    cached_file = cache_dir / "transcripts" / safe_model / f"{transcribe.cache_key(tiny_wav)}.json"
     assert cached_file.exists()
 
     # Second call should hit the cache: whisper must not run again.
@@ -84,7 +85,7 @@ def test_transcribe_folder_skips_unsupported(tmp_path: Path, tiny_wav: Path, mon
     target = folder / "clip.wav"
     target.write_bytes(tiny_wav.read_bytes())
 
-    monkeypatch.setattr(transcribe, "_run_whisper", lambda p: FAKE_WHISPER_OUTPUT)
+    monkeypatch.setattr(transcribe, "_run_whisper", lambda p, model="": FAKE_WHISPER_OUTPUT)
 
     results = transcribe.transcribe_folder(folder, tmp_path / "cache")
     assert len(results) == 1

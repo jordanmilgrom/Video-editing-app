@@ -23,9 +23,9 @@ from pathlib import Path
 
 from roughcut.models import Segment, Transcript, Word
 
-WHISPER_MODEL = "mlx-community/whisper-large-v3-mlx"
+DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-mlx"
 AUDIO_SAMPLE_RATE = 16_000
-SUPPORTED_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".wav", ".mp3", ".m4a"}
+SUPPORTED_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".mxf", ".wav", ".mp3", ".m4a", ".aac", ".flac"}
 
 
 def cache_key(path: Path) -> str:
@@ -35,8 +35,12 @@ def cache_key(path: Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _cache_path(cache_dir: Path, key: str) -> Path:
-    return cache_dir / "transcripts" / f"{key}.json"
+def _safe_model(model: str) -> str:
+    return model.replace("/", "_")
+
+
+def _cache_path(cache_dir: Path, key: str, model: str) -> Path:
+    return cache_dir / "transcripts" / _safe_model(model) / f"{key}.json"
 
 
 def _atomic_write_json(path: Path, payload: str) -> None:
@@ -77,13 +81,13 @@ def _probe_duration(media_path: Path) -> float:
     return float(out.stdout.strip() or 0.0)
 
 
-def _run_whisper(wav_path: Path) -> dict:
+def _run_whisper(wav_path: Path, model: str = DEFAULT_WHISPER_MODEL) -> dict:
     """Run mlx-whisper. Imported lazily; tests monkeypatch this function."""
     import mlx_whisper  # type: ignore[import-not-found]
 
     return mlx_whisper.transcribe(
         str(wav_path),
-        path_or_hf_repo=WHISPER_MODEL,
+        path_or_hf_repo=model,
         word_timestamps=True,
     )
 
@@ -113,18 +117,18 @@ def _parse_whisper_result(raw: dict, source_path: Path, source_hash: str, durati
     )
 
 
-def transcribe(media_path: Path, cache_dir: Path) -> Transcript:
+def transcribe(media_path: Path, cache_dir: Path, model: str = DEFAULT_WHISPER_MODEL) -> Transcript:
     """Transcribe a single media file, hitting cache when available."""
     media_path = Path(media_path)
     key = cache_key(media_path)
-    cache_file = _cache_path(cache_dir, key)
+    cache_file = _cache_path(cache_dir, key, model)
     if cache_file.exists():
         return Transcript.model_validate_json(cache_file.read_text(encoding="utf-8"))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         wav = Path(tmpdir) / "audio.wav"
         extract_audio(media_path, wav)
-        raw = _run_whisper(wav)
+        raw = _run_whisper(wav, model=model)
 
     duration = _probe_duration(media_path)
     transcript = _parse_whisper_result(raw, media_path, key, duration)
@@ -132,17 +136,20 @@ def transcribe(media_path: Path, cache_dir: Path) -> Transcript:
     return transcript
 
 
-def transcribe_folder(interview_dir: Path, cache_dir: Path) -> list[Transcript]:
+def transcribe_folder(
+    interview_dir: Path, cache_dir: Path, model: str = DEFAULT_WHISPER_MODEL
+) -> list[Transcript]:
     """Transcribe every supported media file in a folder, sorted by name."""
     files = sorted(
         p for p in Path(interview_dir).iterdir()
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
     )
-    return [transcribe(f, cache_dir) for f in files]
+    return [transcribe(f, cache_dir, model=model) for f in files]
 
 
 __all__ = [
     "AUDIO_SAMPLE_RATE",
+    "DEFAULT_WHISPER_MODEL",
     "SUPPORTED_EXTS",
     "cache_key",
     "extract_audio",
