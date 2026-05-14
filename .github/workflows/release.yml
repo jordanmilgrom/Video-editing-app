@@ -32,6 +32,47 @@ jobs:
         with:
           node-version: '20'
 
+      # v0.6.5 P-22: run the Python unit tests first, including the
+      # FCPXML validator's self-check on the canonical output. Catches
+      # the v0.6.4 "Invalid edit with no respective media" regression
+      # class before the .dxt build wastes CI time.
+      - name: Install xmllint (libxml2-utils)
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Run unit tests
+        run: pytest -W ignore::DeprecationWarning
+
+      - name: Emit + validate a canonical FCPXML
+        run: |
+          python -c "
+          import tempfile
+          from pathlib import Path
+          from roughcut_core import fcpxml, fcpxml_validate
+          from roughcut_core.models import SequenceSpec, ARollSegment, BRollInsert
+          with tempfile.TemporaryDirectory() as t:
+              t = Path(t)
+              a = t/'interview.mov'; a.write_bytes(b'x')
+              b = t/'broll.mov'; b.write_bytes(b'x')
+              spec = SequenceSpec(
+                  aroll=[ARollSegment(source_path=a, source_in_sec=0, source_out_sec=5),
+                         ARollSegment(source_path=a, source_in_sec=10, source_out_sec=15)],
+                  broll=[BRollInsert(source_path=b, source_in_sec=0,
+                                     source_out_sec=2, timeline_offset_sec=1)],
+              )
+              out = t/'cut.fcpxml'
+              fcpxml.write_fcpxml(spec, out)
+              v = fcpxml_validate.validate_fcpxml(out)
+              print(v)
+              assert v['ok'], v['errors']
+              assert v['details']['xmllint_run'] is True
+              assert v['details']['xmllint_returncode'] == 0
+          "
+
       - name: Build roughcut.dxt
         run: bash scripts/build-dxt.sh
 
