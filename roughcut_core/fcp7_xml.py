@@ -58,16 +58,18 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
     video = ET.SubElement(media, "video")
     _format_block(video, spec)
 
-    # File pool: one <file> per unique source path. Lookup table keyed on
-    # path string so V2 inserts reference the same file id as V1.
+    # File pool: one <file> per unique RESOLVED source path. v0.6.5: we
+    # resolve before keying so two surface forms of the same file collapse
+    # into one <file> id — same root cause and same fix as the FCPXML
+    # emitter (P0 #1). Premiere accepts duplicate file ids less
+    # gracefully than FCP, so this matters for the .xml path too.
+    aroll_keys = [_resolve_for_dedup(s.source_path) for s in spec.aroll]
+    broll_keys = [_resolve_for_dedup(ins.source_path) for ins in spec.broll]
     paths: list[Path] = []
     seen: set[Path] = set()
-    for s in spec.aroll:
-        if s.source_path not in seen:
-            seen.add(s.source_path); paths.append(s.source_path)
-    for ins in spec.broll:
-        if ins.source_path not in seen:
-            seen.add(ins.source_path); paths.append(ins.source_path)
+    for k in aroll_keys + broll_keys:
+        if k not in seen:
+            seen.add(k); paths.append(k)
     file_ids = {p: f"file-{i}" for i, p in enumerate(paths, start=1)}
 
     # V1: A-roll spine. Files declared inline on the first reference;
@@ -80,7 +82,7 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
         out_f = _frames(seg.out_sec, spec.fps)
         dur_f = out_f - in_f
         _clipitem(
-            v1, f"clipitem-a{clip_idx}", seg.source_path,
+            v1, f"clipitem-a{clip_idx}", aroll_keys[clip_idx - 1],
             file_ids, declared, spec.fps, timebase, ntsc,
             start=cursor, end=cursor + dur_f, in_=in_f, out=out_f,
         )
@@ -97,7 +99,7 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
                 continue
             offset_f = _frames(ins.aroll_offset_sec, spec.fps)
             _clipitem(
-                v2, f"clipitem-b{clip_idx}", ins.source_path,
+                v2, f"clipitem-b{clip_idx}", broll_keys[clip_idx - 1],
                 file_ids, declared, spec.fps, timebase, ntsc,
                 start=offset_f, end=offset_f + dur_f, in_=in_f, out=out_f,
             )
@@ -145,32 +147,39 @@ def _format_block(parent: ET.Element, spec: SequenceSpec) -> None:
 
 
 def _clipitem(
-    track: ET.Element, clip_id: str, source_path: Path,
+    track: ET.Element, clip_id: str, source_key: Path,
     file_ids: dict[Path, str], declared: set[Path],
     fps: float, timebase: int, ntsc: str,
     *, start: int, end: int, in_: int, out: int,
 ) -> None:
     item = ET.SubElement(track, "clipitem", {"id": clip_id})
-    ET.SubElement(item, "name").text = Path(source_path).stem
+    ET.SubElement(item, "name").text = source_key.stem
     ET.SubElement(item, "duration").text = str(out - in_)
     _rate_block(item, timebase, ntsc)
     ET.SubElement(item, "start").text = str(start)
     ET.SubElement(item, "end").text = str(end)
     ET.SubElement(item, "in").text = str(in_)
     ET.SubElement(item, "out").text = str(out)
-    file_id = file_ids[source_path]
-    if source_path in declared:
+    file_id = file_ids[source_key]
+    if source_key in declared:
         # Reference-only form for subsequent uses of the same source.
         ET.SubElement(item, "file", {"id": file_id})
     else:
-        declared.add(source_path)
+        declared.add(source_key)
         file_el = ET.SubElement(item, "file", {"id": file_id})
-        ET.SubElement(file_el, "name").text = Path(source_path).name
-        ET.SubElement(file_el, "pathurl").text = Path(source_path).resolve().as_uri()
+        ET.SubElement(file_el, "name").text = source_key.name
+        # `as_uri()` percent-encodes spaces / `#` / `[` / `]` / etc., which is
+        # the Premiere-correct form. v0.6.5 P0 #2.
+        ET.SubElement(file_el, "pathurl").text = source_key.as_uri()
         _rate_block(file_el, timebase, ntsc)
         # Whole-file duration unknown without ffprobe; use the
         # max-referenced out as a lower bound. Premiere relinks happily.
         ET.SubElement(file_el, "duration").text = str(out)
+
+
+def _resolve_for_dedup(p: Path | str) -> Path:
+    """Mirror of `fcpxml._resolve_for_dedup` — see that docstring."""
+    return Path(p).resolve(strict=False)
 
 
 def _write_xml(root: ET.Element, output_path: Path) -> None:
