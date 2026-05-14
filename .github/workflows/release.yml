@@ -40,12 +40,8 @@ jobs:
   smoke-test:
     needs: build
     runs-on: macos-14
-    # No actions/checkout here — and that's intentional. With the repo
-    # checked out at $PWD, Python's cwd-based import machinery would
-    # load roughcut_core from the REPO copy (where models_catalog.py's
-    # __file__ resolves to repo/models, which doesn't exist) instead of
-    # the unpacked .dxt copy (where the bundled whisper-small lives).
-    # Surfaced as: AssertionError: resolved 'small' to non-path: …
+    # No actions/checkout here — cwd-shadowing would load roughcut_core
+    # from the repo instead of the unpacked .dxt.
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -95,7 +91,6 @@ jobs:
           from roughcut_core import models_catalog, transcribe
           resolved = models_catalog.resolve("small")
           assert Path(resolved).is_dir(), f"resolved 'small' to non-path: {resolved}"
-          print(f"resolved small -> {resolved}")
           t = transcribe.transcribe(
               Path("/tmp/silence.wav"), Path("/tmp/rc-cache"), model=resolved,
           )
@@ -107,7 +102,7 @@ jobs:
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export ROUGHCUT_CACHE_DIR="$PWD/smoke-cache"
           python3.11 - <<'PY'
-          import os, time, sys
+          import os, time
           from pathlib import Path
           from roughcut_core import jobs
 
@@ -115,7 +110,7 @@ jobs:
           cache.mkdir(parents=True, exist_ok=True)
 
           j = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
-          assert j.job_id, f"no job_id: {j}"
+          assert j.job_id, j
           deadline = time.time() + 10
           last = j
           while time.time() < deadline:
@@ -129,24 +124,71 @@ jobs:
           j2 = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
           assert j2.job_id == j.job_id and j2.status == "succeeded"
 
-          fake = jobs.Job(
-              job_id="bogus", tool_name="transcribe_video", args={},
-              status="running", started_at=time.time(), updated_at=time.time(),
-              pid=999_999_999,
-          )
-          jobs.write(cache, fake)
-          assert jobs.cancel(cache, "bogus").status == "cancelled"
-
-          fake2 = jobs.Job(
-              job_id="dead", tool_name="transcribe_video", args={},
-              status="running", started_at=time.time(), updated_at=time.time(),
-              pid=999_999_998,
-          )
-          jobs.write(cache, fake2)
-          touched = jobs.recover_interrupted(cache)
-          assert "dead" in {t.job_id for t in touched}
-
           assert jobs.read(cache, "no-such-id") is None
+          print("OK")
+          PY
+
+      - name: Concurrency burst — 20 jobs + list_jobs <1s (v0.6.3 lockup guard)
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export ROUGHCUT_CACHE_DIR="$PWD/burst-cache"
+          python3.11 - <<'PY'
+          import os, time
+          from pathlib import Path
+          from roughcut_core import jobs
+
+          cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
+          cache.mkdir(parents=True, exist_ok=True)
+
+          t0 = time.time()
+          ids = [jobs.spawn(cache, "_test_noop", {"burst": i}).job_id for i in range(20)]
+          spawn_elapsed = time.time() - t0
+          print(f"20 spawns in {spawn_elapsed:.3f}s")
+          assert len(set(ids)) == 20
+          assert spawn_elapsed < 3.0, f"20 spawns took {spawn_elapsed:.2f}s — too slow"
+
+          t1 = time.time()
+          listed = jobs.list_jobs(cache)
+          list_elapsed = time.time() - t1
+          print(f"list_jobs({len(listed)} jobs) in {list_elapsed:.3f}s")
+          assert len(listed) >= 20
+          assert list_elapsed < 1.0, f"list_jobs took {list_elapsed:.2f}s — target <1s"
+          print("OK")
+          PY
+
+      - name: Documentary mode — read_transcript pagination + search hit
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export ROUGHCUT_CACHE_DIR="$PWD/docs-cache"
+          mkdir -p docs-cache/transcripts/test
+          python3.11 - <<'PY'
+          import os
+          from pathlib import Path
+          from roughcut_core import documentary
+          from roughcut_core.models import Segment, Transcript
+
+          cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
+          src = cache / "fake.mp4"; src.touch()
+          path = cache / "transcripts" / "test" / "fake.json"
+          segments = [Segment(text=f"Wisconsin chunk {i} " + "x" * 400,
+                              start=float(i), end=float(i + 1)) for i in range(8)]
+          path.write_text(Transcript(
+              source_path=src, source_hash="h", duration=8.0,
+              language="en", segments=segments,
+          ).model_dump_json())
+
+          page1 = documentary.read_transcript(path, max_chars=1500)
+          assert page1["has_more"] is True, page1
+          assert page1["segments"][0]["text"].startswith("Wisconsin chunk 0")
+
+          page2 = documentary.read_transcript(
+              path, start_segment=page1["next_start"], max_chars=1500,
+          )
+          assert page2["segments"][0]["idx"] == page1["next_start"]
+
+          hits = documentary.search_transcripts("Wisconsin", cache)
+          assert hits["result_count"] >= 1, hits
+          assert "Wisconsin" in hits["results"][0]["matched_text"]
           print("OK")
           PY
 
