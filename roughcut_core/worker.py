@@ -1,12 +1,10 @@
 """Job worker subprocess.
 
-Spawned by `roughcut_core.jobs.spawn()` as:
-    python -m roughcut_core.worker <job_id>
-
-Reads the persisted Job JSON, runs the tool, updates progress and the
-final result_path / error fields back to the same JSON. The MCP server
-never blocks; it just reads this file when the agent calls
-check_job_status.
+v0.6.3 redesign. Spawned by `roughcut_core.jobs._spawn_worker()` (no
+argv): the worker pops job_ids off the on-disk queue and runs them
+serially. Survives Claude Desktop quit (`start_new_session=True`).
+Exits after `IDLE_EXIT_SECONDS` of no work — the next `jobs.spawn()`
+call respawns it via `_ensure_workers`.
 
 Heavy imports (mlx-whisper, scipy) live inside the dispatch functions
 so the worker module itself stays importable on Linux for tests.
@@ -25,31 +23,70 @@ from typing import Any
 
 from roughcut_core import jobs
 
+IDLE_EXIT_SECONDS = 120
+
+_current_job_id: str | None = None
+_current_cache_dir: Path | None = None
+
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]
-    if len(argv) != 1:
-        print("usage: python -m roughcut_core.worker <job_id>", file=sys.stderr)
-        return 2
-
-    job_id = argv[0]
+    global _current_cache_dir
     cache_dir = Path(os.environ.get("ROUGHCUT_CACHE_DIR") or (Path.home() / ".cache" / "roughcut"))
-    job = jobs.read(cache_dir, job_id)
-    if job is None:
-        print(f"worker: job {job_id} not found", file=sys.stderr)
-        return 1
-
-    # Make Ctrl-C / SIGTERM from cancel_job land cleanly in the JSON.
-    def _on_term(_sig: int, _frame: Any) -> None:
-        j = jobs.read(cache_dir, job_id)
-        if j and j.status in ("started", "running"):
-            j.status = "cancelled"
-            j.current_step = "cancelled by signal"
-            jobs.write(cache_dir, j)
-        sys.exit(130)
+    _current_cache_dir = cache_dir
+    slot = int(os.environ.get("ROUGHCUT_WORKER_SLOT", "0"))
+    pid_file = jobs._worker_pid_path(cache_dir, slot)
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     signal.signal(signal.SIGTERM, _on_term)
 
+    try:
+        _run_loop(cache_dir)
+    finally:
+        try:
+            if pid_file.read_text().strip() == str(os.getpid()):
+                pid_file.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
+    return 0
+
+
+def _run_loop(cache_dir: Path) -> None:
+    global _current_job_id
+    idle_since: float | None = None
+    while True:
+        job_id = jobs.pop_from_queue(cache_dir)
+        if job_id is None:
+            if idle_since is None:
+                idle_since = time.time()
+            elif time.time() - idle_since > IDLE_EXIT_SECONDS:
+                return
+            time.sleep(0.5)
+            continue
+        idle_since = None
+        _current_job_id = job_id
+        try:
+            _run_one(cache_dir, job_id)
+        finally:
+            _current_job_id = None
+
+
+def _on_term(_sig: int, _frame: Any) -> None:
+    if _current_job_id and _current_cache_dir is not None:
+        j = jobs.read(_current_cache_dir, _current_job_id)
+        if j and j.status in ("queued", "started", "running"):
+            j.status = "cancelled"
+            j.current_step = "cancelled by signal"
+            jobs.write(_current_cache_dir, j)
+    sys.exit(130)
+
+
+def _run_one(cache_dir: Path, job_id: str) -> None:
+    job = jobs.read(cache_dir, job_id)
+    if job is None:
+        return
+    if job.status == "cancelled":
+        return
     job.status = "running"
     job.pid = os.getpid()
     job.current_step = "starting"
@@ -67,10 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         job.error = f"{type(exc).__name__}: {exc}"
         job.traceback = tb.format_exc()
         job.hint = _hint_for(exc)
-    finally:
-        jobs.write(cache_dir, job)
-
-    return 0 if job.status == "succeeded" else 1
+    jobs.write(cache_dir, job)
 
 
 def _dispatch(job: jobs.Job, cache_dir: Path) -> tuple[Path | None, dict]:
@@ -89,8 +123,6 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
     if lang and lang.lower() == "auto":
         lang = None
 
-    # Auto-prewarm: if the requested model isn't on disk yet, fetch it
-    # in-flight so the user never has to think about a separate download.
     if requested_model in models_catalog.SHORT_TO_HF and not models_catalog.is_cached(requested_model):
         size = models_catalog.APPROX_SIZE_MB.get(requested_model, 0)
         _step(job, cache_dir, f"downloading whisper-{requested_model} (~{size} MB)", progress=5.0)
@@ -99,8 +131,6 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
     model_arg = models_catalog.resolve(requested_model)
     _step(job, cache_dir, "extracting audio + transcribing", progress=30.0)
     t = transcribe.transcribe(path, cache_dir, model=model_arg, language=lang)
-    # Cache key uses the short name so the on-disk transcript path is
-    # stable across "small" vs "/abs/path/to/small" resolutions.
     transcript_path = cache_dir / "transcripts" / transcribe._safe_model(requested_model) / f"{transcribe.cache_key(path)}.json"
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     if not transcript_path.exists():
@@ -118,7 +148,6 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
 
 
 def _do_prewarm_model(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
-    """Download a whisper model in the background so a later transcribe is instant."""
     from roughcut_core import models_catalog
     name = job.args["model_name"]
     if name not in models_catalog.SHORT_TO_HF:
@@ -135,7 +164,6 @@ def _do_prewarm_model(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
 
 
 def _download_hf_model(repo_id: str) -> None:
-    """Pull the full repo snapshot into the HF cache. Lazy import."""
     from huggingface_hub import snapshot_download
     snapshot_download(repo_id=repo_id)
 
