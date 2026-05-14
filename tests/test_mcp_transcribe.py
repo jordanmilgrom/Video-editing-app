@@ -1,10 +1,19 @@
-"""Tests for `transcribe_video` MCP tool wrapper."""
+"""Tests for the transcribe_video tool.
+
+The MCP wrapper is now a thin spawner; the actual transcription logic
+lives in roughcut_core.worker._do_transcribe_video. We test the worker
+handler directly (mocking mlx-whisper) and the MCP wrapper's validation
+behavior separately.
+"""
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
-from roughcut_core import transcribe
+import pytest
+
+from roughcut_core import jobs, transcribe, worker
 from roughcut_mcp import tools
 from tests.conftest import requires_ffmpeg
 
@@ -18,28 +27,43 @@ FAKE_OUTPUT = {
 }
 
 
-def test_transcribe_video_rejects_relative_path() -> None:
-    res = tools._transcribe_video("relative.wav", "auto", "model", None)
-    assert res.ok is False
-    assert res.error == "relative_path"
+def _make_job(tmp_path: Path, args: dict) -> jobs.Job:
+    now = time.time()
+    return jobs.Job(
+        job_id="test", tool_name="transcribe_video", args=args,
+        status="running", started_at=now, updated_at=now,
+    )
 
 
-def test_transcribe_video_rejects_missing_file(tmp_path: Path) -> None:
-    res = tools._transcribe_video(str(tmp_path / "ghost.wav"), "auto", "model", None)
-    assert res.ok is False
-    assert res.error == "not_a_file"
+def test_path_validation_rejects_relative_path() -> None:
+    # The transcribe_video MCP wrapper calls abs_file() before spawning;
+    # this exercises the same gate.
+    from roughcut_mcp.responses import abs_file
+    bad = abs_file("relative.wav")
+    assert hasattr(bad, "ok") and bad.ok is False
+    assert bad.error == "relative_path"
+
+
+def test_path_validation_rejects_missing_file(tmp_path: Path) -> None:
+    from roughcut_mcp.responses import abs_file
+    bad = abs_file(str(tmp_path / "ghost.wav"))
+    assert hasattr(bad, "ok") and bad.ok is False
+    assert bad.error == "not_a_file"
 
 
 @requires_ffmpeg
-def test_transcribe_video_returns_summary_with_transcript_path(
+def test_worker_handler_writes_transcript_and_summary(
     tmp_path: Path, tiny_wav: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(transcribe, "_run_whisper",
                         lambda p, model="", language=None: FAKE_OUTPUT)
     cache = tmp_path / "cache"
-    res = tools._transcribe_video(str(tiny_wav), "auto", transcribe.DEFAULT_WHISPER_MODEL, str(cache))
-    assert res.ok is True and res.error is None
-    summary = res.summary or {}
+    cache.mkdir()
+    job = _make_job(tmp_path, {
+        "video_path": str(tiny_wav), "language": "auto",
+        "model": transcribe.DEFAULT_WHISPER_MODEL,
+    })
+    result_path, summary = worker._do_transcribe_video(job, cache)
     assert summary["language"] == "en"
     assert summary["segment_count"] == 1
     assert "Hello world." in summary["first_200_chars"]
@@ -47,7 +71,9 @@ def test_transcribe_video_returns_summary_with_transcript_path(
 
 
 @requires_ffmpeg
-def test_transcribe_video_language_forwarded(tmp_path: Path, tiny_wav: Path, monkeypatch) -> None:
+def test_worker_handler_forwards_language(
+    tmp_path: Path, tiny_wav: Path, monkeypatch
+) -> None:
     received: dict = {}
 
     def fake(p, model="", language=None):
@@ -55,9 +81,17 @@ def test_transcribe_video_language_forwarded(tmp_path: Path, tiny_wav: Path, mon
         return FAKE_OUTPUT
 
     monkeypatch.setattr(transcribe, "_run_whisper", fake)
-    tools._transcribe_video(str(tiny_wav), "auto", "m", str(tmp_path / "c"))
+    cache = tmp_path / "c"
+    cache.mkdir()
+    worker._do_transcribe_video(_make_job(tmp_path, {
+        "video_path": str(tiny_wav), "language": "auto", "model": "m",
+    }), cache)
     assert received["language"] is None
 
     received.clear()
-    tools._transcribe_video(str(tiny_wav), "es", "m", str(tmp_path / "c2"))
+    cache2 = tmp_path / "c2"
+    cache2.mkdir()
+    worker._do_transcribe_video(_make_job(tmp_path, {
+        "video_path": str(tiny_wav), "language": "es", "model": "m",
+    }), cache2)
     assert received["language"] == "es"

@@ -85,6 +85,71 @@ jobs:
           unpacked/server/bin/ffmpeg -version | head -1
           unpacked/server/bin/ffprobe -version | head -1
 
+      - name: Job-system end-to-end smoke test
+        # Spawns a tiny _test_noop job in the unpacked bundle, polls until
+        # succeeded, then exercises: cancel_job on an unknown id, list_jobs,
+        # and the startup recover_interrupted scan. Catches breakage in the
+        # subprocess plumbing without burning time on a real transcription.
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export ROUGHCUT_CACHE_DIR="$PWD/smoke-cache"
+          python3.11 - <<'PY'
+          import os, time, sys
+          from pathlib import Path
+          from roughcut_core import jobs
+
+          cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
+          cache.mkdir(parents=True, exist_ok=True)
+
+          # 1. Spawn — must return immediately with a job_id.
+          j = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
+          assert j.job_id, f"no job_id: {j}"
+          print(f"spawned job_id={j.job_id} status={j.status}")
+
+          # 2. Poll for succeeded.
+          deadline = time.time() + 10
+          last = j
+          while time.time() < deadline:
+              last = jobs.read(cache, j.job_id)
+              if last and last.status in {"succeeded", "failed"}:
+                  break
+              time.sleep(0.1)
+          assert last.status == "succeeded", f"job didn't succeed: {last}"
+          assert last.result_summary == {"echo": "ok"}, last.result_summary
+          print(f"job succeeded: result_summary={last.result_summary}")
+
+          # 3. Idempotency: a re-spawn with same args returns the cached job.
+          j2 = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
+          assert j2.job_id == j.job_id and j2.status == "succeeded"
+          print(f"idempotent: re-spawn returned cached job_id={j2.job_id}")
+
+          # 4. Cancel: forge a fake running job, cancel it, status flips.
+          fake = jobs.Job(
+              job_id="bogus", tool_name="transcribe_video", args={},
+              status="running", started_at=time.time(), updated_at=time.time(),
+              pid=999_999_999,
+          )
+          jobs.write(cache, fake)
+          out = jobs.cancel(cache, "bogus")
+          assert out.status == "cancelled", out
+
+          # 5. Recover scan: a 'running' job with a dead pid → interrupted.
+          fake2 = jobs.Job(
+              job_id="dead", tool_name="transcribe_video", args={},
+              status="running", started_at=time.time(), updated_at=time.time(),
+              pid=999_999_998,
+          )
+          jobs.write(cache, fake2)
+          touched = jobs.recover_interrupted(cache)
+          ids = {t.job_id for t in touched}
+          assert "dead" in ids, ids
+          print(f"recover marked: {ids}")
+
+          # 6. Unknown id: read() returns None (caller maps to clean error).
+          assert jobs.read(cache, "no-such-id") is None
+          print("OK")
+          PY
+
   release:
     needs: smoke-test
     runs-on: ubuntu-latest
