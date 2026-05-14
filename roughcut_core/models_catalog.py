@@ -28,6 +28,8 @@ SHORT_TO_HF: dict[str, str] = {
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
 
+# Approximate on-disk sizes in MB, for surfacing to the user before a
+# download. Real values differ slightly across mlx-community quantizations.
 APPROX_SIZE_MB: dict[str, int] = {
     "small": 480,
     "medium": 1500,
@@ -85,7 +87,11 @@ def resolve(name: str) -> str:
 
 
 def is_cached(short_name: str) -> bool:
-    """True if either bundled or already present in the HF hub cache."""
+    """True if either bundled or already present in the HF hub cache.
+
+    `transcribe_video` uses this to decide whether to auto-prewarm
+    in-flight before running the model.
+    """
     if is_bundled(short_name):
         return True
     repo = SHORT_TO_HF.get(short_name)
@@ -157,6 +163,7 @@ def _hf_cache_last_used(repo_id: str | None) -> float | None:
 
 
 def inventory() -> list[dict]:
+    """Whatever `get_system_status` wants to surface about local models."""
     out: list[dict] = []
     for short, repo in SHORT_TO_HF.items():
         bundled = is_bundled(short)

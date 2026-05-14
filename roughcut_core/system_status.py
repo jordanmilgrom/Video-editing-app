@@ -35,7 +35,13 @@ def collect(cache_dir: Path) -> dict:
 
 
 def _workers_block(cache_dir: Path, jobs) -> dict:
-    """Surface the worker-pool config + the live queue depth."""
+    """Surface the worker-pool config + the live queue depth.
+
+    Power users want to see `transcribe_concurrency_limit` to know how
+    parallel a 31-clip transcribe will run. The default of 1 is right
+    for mlx-whisper on Apple Silicon — bump via ROUGHCUT_WORKER_POOL_SIZE
+    only after benchmarking.
+    """
     limit = jobs.pool_size()
     live: list[int] = []
     for slot in range(limit):
@@ -56,6 +62,11 @@ def _workers_block(cache_dir: Path, jobs) -> dict:
 
 
 def _models_block(items: list[dict]) -> dict:
+    """Roll the models inventory into the {ok, ...} shape `collect` uses.
+
+    `ok=True` iff at least one model is on disk — otherwise the first
+    transcribe will block on a multi-minute download.
+    """
     any_cached = any(m["cached"] for m in items)
     return {
         "ok": any_cached,
@@ -90,8 +101,9 @@ def _binary_check(name: str, probe: list[str]) -> dict:
 
 
 def _mlx_whisper_check() -> dict:
+    """Catches the libmlx.dylib regression class without doing a real transcribe."""
     try:
-        import mlx.core  # noqa: F401
+        import mlx.core  # noqa: F401  (loads core.cpython-311-darwin.so → libmlx.dylib)
         import mlx_whisper  # noqa: F401
         return {"ok": True}
     except Exception as e:  # noqa: BLE001

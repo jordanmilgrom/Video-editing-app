@@ -23,8 +23,12 @@ from typing import Any
 
 from roughcut_core import jobs
 
+# After this many seconds with no jobs queued, the worker shuts down.
+# Re-spawn is cheap; sitting idle wastes a python process slot.
 IDLE_EXIT_SECONDS = 120
 
+# Active job id while a handler is running. SIGTERM uses this to flip
+# the currently-executing job to "cancelled" before the worker exits.
 _current_job_id: str | None = None
 _current_cache_dir: Path | None = None
 
@@ -72,6 +76,7 @@ def _run_loop(cache_dir: Path) -> None:
 
 
 def _on_term(_sig: int, _frame: Any) -> None:
+    """SIGTERM lands here. Flip the active job (if any) to cancelled, then exit."""
     if _current_job_id and _current_cache_dir is not None:
         j = jobs.read(_current_cache_dir, _current_job_id)
         if j and j.status in ("queued", "started", "running"):
@@ -85,6 +90,8 @@ def _run_one(cache_dir: Path, job_id: str) -> None:
     job = jobs.read(cache_dir, job_id)
     if job is None:
         return
+    # Honor pre-pop cancellation: cancel() may have flipped the record
+    # to "cancelled" while this id was sitting in the queue.
     if job.status == "cancelled":
         return
     job.status = "running"
@@ -107,6 +114,11 @@ def _run_one(cache_dir: Path, job_id: str) -> None:
     jobs.write(cache_dir, job)
 
 
+# ---------------------------------------------------------------------------
+# Tool-specific dispatchers
+# ---------------------------------------------------------------------------
+
+
 def _dispatch(job: jobs.Job, cache_dir: Path) -> tuple[Path | None, dict]:
     handler = _HANDLERS.get(job.tool_name)
     if handler is None:
@@ -123,6 +135,8 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
     if lang and lang.lower() == "auto":
         lang = None
 
+    # Auto-prewarm: if the requested model isn't on disk yet, fetch it
+    # in-flight so the user never has to think about a separate download.
     if requested_model in models_catalog.SHORT_TO_HF and not models_catalog.is_cached(requested_model):
         size = models_catalog.APPROX_SIZE_MB.get(requested_model, 0)
         _step(job, cache_dir, f"downloading whisper-{requested_model} (~{size} MB)", progress=5.0)
@@ -131,6 +145,8 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
     model_arg = models_catalog.resolve(requested_model)
     _step(job, cache_dir, "extracting audio + transcribing", progress=30.0)
     t = transcribe.transcribe(path, cache_dir, model=model_arg, language=lang)
+    # Cache key uses the short name so the on-disk transcript path is
+    # stable across "small" vs "/abs/path/to/small" resolutions.
     transcript_path = cache_dir / "transcripts" / transcribe._safe_model(requested_model) / f"{transcribe.cache_key(path)}.json"
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     if not transcript_path.exists():
@@ -143,11 +159,23 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
         "language": t.language,
         "model": requested_model,
         "first_200_chars": full_text[:200],
+        # Discoverability: chat-side Claude shouldn't have to stumble onto
+        # the docs-mode tools by accident. Surface them in every transcribe
+        # result so a fresh agent knows the obvious next moves.
+        "next_tools": [
+            {"name": "summarize_clip",
+             "what": "Deterministic snippet view (no LLM) — opening/closing 200 chars + longest segment."},
+            {"name": "read_transcript",
+             "what": "Page through the full transcript in ~900 KB chunks (use start_segment/next_start)."},
+            {"name": "search_transcripts",
+             "what": "Case-insensitive substring search across every cached transcript."},
+        ],
     }
     return transcript_path, summary
 
 
 def _do_prewarm_model(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
+    """Download a whisper model in the background so a later transcribe is instant."""
     from roughcut_core import models_catalog
     name = job.args["model_name"]
     if name not in models_catalog.SHORT_TO_HF:
@@ -164,6 +192,7 @@ def _do_prewarm_model(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
 
 
 def _download_hf_model(repo_id: str) -> None:
+    """Pull the full repo snapshot into the HF cache. Lazy import."""
     from huggingface_hub import snapshot_download
     snapshot_download(repo_id=repo_id)
 
@@ -280,11 +309,14 @@ def _do_pick_angle(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
 
 
 def _do_test_noop(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
+    """Test-only: succeed instantly. Lets tests exercise the lifecycle
+    without dragging in mlx-whisper or scipy at worker import time."""
     time.sleep(0.05)
     return None, {"echo": "ok"}
 
 
 def _do_test_sleep(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
+    """Test-only: sleeps long enough to be cancelled."""
     seconds = float(job.args.get("seconds", 5))
     end = time.time() + seconds
     while time.time() < end:
@@ -294,6 +326,7 @@ def _do_test_sleep(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
 
 
 def _do_test_boom(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
+    """Test-only: raises so we can assert traceback capture."""
     raise RuntimeError("intentional test failure")
 
 
@@ -319,6 +352,7 @@ def _step(job: jobs.Job, cache_dir: Path, step: str, progress: float | None = No
 
 
 def _hint_for(exc: Exception) -> str | None:
+    """Map common errors to a short actionable hint the agent can show."""
     msg = str(exc).lower()
     if "libmlx" in msg or "@rpath" in msg:
         return ("The bundled libmlx.dylib didn't load. Rebuild the .dxt — "
