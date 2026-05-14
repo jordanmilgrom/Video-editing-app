@@ -85,6 +85,36 @@ jobs:
           unpacked/server/bin/ffmpeg -version | head -1
           unpacked/server/bin/ffprobe -version | head -1
 
+      - name: whisper-small must be bundled (v0.6.1 promise)
+        run: |
+          test -d unpacked/server/models/whisper-small
+          test -f unpacked/server/models/whisper-small/config.json
+          du -sh unpacked/server/models/whisper-small
+
+      - name: Offline transcribe smoke test (HF_HUB_OFFLINE=1)
+        # Generate a tiny silent WAV, transcribe with the bundled small
+        # model, prove there's no network round-trip. Catches the
+        # regression where the bundled model isn't actually picked up.
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export PATH="$PWD/unpacked/server/python/bin:$PWD/unpacked/server/bin:$PATH"
+          ffmpeg -y -loglevel error -f lavfi -i "anullsrc=r=16000:cl=mono" -t 2 /tmp/silence.wav
+          mkdir -p /tmp/rc-cache
+          python3.11 - <<'PY'
+          from pathlib import Path
+          from roughcut_core import models_catalog, transcribe
+          resolved = models_catalog.resolve("small")
+          assert Path(resolved).is_dir(), f"resolved 'small' to non-path: {resolved}"
+          print(f"resolved small -> {resolved}")
+          t = transcribe.transcribe(
+              Path("/tmp/silence.wav"), Path("/tmp/rc-cache"), model=resolved,
+          )
+          print(f"offline transcribe ok: {len(t.segments)} segments, lang={t.language}")
+          PY
+
       - name: Job-system end-to-end smoke test
         # Spawns a tiny _test_noop job in the unpacked bundle, polls until
         # succeeded, then exercises: cancel_job on an unknown id, list_jobs,

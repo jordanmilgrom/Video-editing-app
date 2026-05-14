@@ -2,8 +2,8 @@
   "dxt_version": "0.1",
   "name": "roughcut",
   "display_name": "roughcut — AI rough-cut assistant",
-  "version": "0.6.0",
-  "description": "First-draft video editor driven by your Claude agent. Doc/interview and multicam podcast modes. Long-running work runs as background jobs that survive Claude Desktop restarts.",
+  "version": "0.6.1",
+  "description": "First-draft video editor driven by your Claude agent. Bundles whisper-small for offline first-run transcription. Doc/interview and multicam podcast modes. Long-running work runs as background jobs that survive Claude Desktop restarts.",
   "long_description": "Point roughcut at a folder of interview footage and a folder of b-roll. The agent picks the cleanest takes, decides where b-roll fits, and writes a Premiere / DaVinci Resolve project file. roughcut does the deterministic work (transcribe, cluster takes, contact-sheet frames, build FCPXML); your Claude subscription pays for the reasoning. macOS Apple Silicon only.",
   "author": {
     "name": "roughcut"
@@ -31,7 +31,8 @@
   },
   "tools": [
     {"name": "list_clips", "description": "Inventory video files in a folder via ffprobe (sync)."},
-    {"name": "transcribe_video", "description": "Spawn an mlx-whisper transcription job; returns job_id."},
+    {"name": "transcribe_video", "description": "Spawn an mlx-whisper transcription job; returns job_id. Default model: whisper-small (bundled)."},
+    {"name": "prewarm_model", "description": "Pre-download a larger whisper model in the background."},
     {"name": "cluster_takes_by_silence", "description": "Spawn a silence-clustering job; returns job_id."},
     {"name": "align_takes_to_script", "description": "Spawn a script-alignment job; returns job_id."},
     {"name": "extract_frame_grid", "description": "Sample frames from a clip into a contact sheet (sync)."},

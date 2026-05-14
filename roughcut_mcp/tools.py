@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import TextContent
 
-from roughcut_core import broll, cache_io, clips, fcpxml, jobs, system_status, transcribe
+from roughcut_core import broll, cache_io, clips, fcpxml, jobs, models_catalog, system_status, transcribe
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
 from roughcut_mcp.responses import ToolResponse, abs_dir, abs_file, abs_path, cache_dir, to_error
@@ -83,7 +83,7 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.TRANSCRIBE_VIDEO)
     def transcribe_video(
         video_path: str, language: str = "auto",
-        model: str = transcribe.DEFAULT_WHISPER_MODEL,
+        model: str = models_catalog.DEFAULT_MODEL,
     ) -> ToolResponse:
         path = abs_file(video_path)
         if isinstance(path, ToolResponse):
@@ -91,6 +91,16 @@ def register_tools(mcp: FastMCP) -> None:
         return _spawn("transcribe_video", {
             "video_path": str(path), "language": language, "model": model,
         })
+
+    @mcp.tool(description=desc.PREWARM_MODEL)
+    def prewarm_model(model_name: str = "large-v3") -> ToolResponse:
+        if model_name not in models_catalog.SHORT_TO_HF:
+            return ToolResponse(
+                ok=False, error="invalid_spec",
+                message=(f"unknown model '{model_name}'. "
+                         f"Choices: {list(models_catalog.SHORT_TO_HF)}"),
+            )
+        return _spawn("prewarm_model", {"model_name": model_name})
 
     @mcp.tool(description=desc.CLUSTER_TAKES_BY_SILENCE)
     def cluster_takes_by_silence(

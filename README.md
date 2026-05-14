@@ -77,14 +77,15 @@ V2. Clips relink to source by absolute path.
 
 ---
 
-## The seventeen tools
+## The eighteen tools
 
 | Tool                         | Sync / Async | Mode      | What it does                                                                  |
 | ---------------------------- | ------------ | --------- | ----------------------------------------------------------------------------- |
 | `get_project_paths`          | sync         | meta      | Return the interview / b-roll / script paths set at install time + cache dir. |
-| `get_system_status`          | sync         | meta      | Preflight: python, ffmpeg, libmlx, whisper model cache, disk space.           |
+| `get_system_status`          | sync         | meta      | Preflight + per-model cache inventory (which models are bundled vs to-fetch). |
 | `list_clips`                 | sync         | shared    | Inventory a folder of video files (ffprobe).                                  |
-| `transcribe_video`           | **async**    | shared    | mlx-whisper transcription; spawns a job, returns `job_id`.                    |
+| `transcribe_video`           | **async**    | shared    | mlx-whisper transcription; default model `small` is bundled (offline ok).     |
+| `prewarm_model`              | **async**    | shared    | Pre-fetch a bigger whisper model (`medium`, `large-v3`, ...) in background.   |
 | `cluster_takes_by_silence`   | **async**    | doc       | Group transcript segments by silence (job).                                   |
 | `align_takes_to_script`      | **async**    | doc       | Fuzzy-match segments to script lines (job).                                   |
 | `extract_frame_grid`         | sync         | doc       | 16 frames → JPEG contact sheet, returned inline.                              |
@@ -122,6 +123,23 @@ free cache hit — no work.
 **Size-bounded returns:** every async tool's result is a JSON file on
 disk under `~/Video-editing-app/cache/`. Tool results to the agent are
 always small (a path + a few counts).
+
+### Whisper models (v0.6.1)
+
+`transcribe_video`'s `model` parameter accepts short names:
+
+| Short name        | Repo                                         | Size      | When to use                              |
+| ----------------- | -------------------------------------------- | --------- | ---------------------------------------- |
+| `small` (default) | `mlx-community/whisper-small-mlx`            | ~480 MB   | **Bundled in the .dxt.** Clear-speaker podcast, interview, scripted VO. Fast. |
+| `medium`          | `mlx-community/whisper-medium-mlx`           | ~1.5 GB   | Noisy audio, accented speakers.          |
+| `large-v3`        | `mlx-community/whisper-large-v3-mlx`         | ~3 GB     | Best quality, multilingual.              |
+| `large-v3-turbo`  | `mlx-community/whisper-large-v3-turbo`       | ~1.6 GB   | Large-v3 quality at ~2x speed.           |
+
+Non-bundled models are auto-downloaded in-flight on first use
+(`check_job_status` shows `current_step` so you can tell whether you're
+waiting on the download or the transcription itself). Call
+`prewarm_model('large-v3')` ahead of time to pre-fetch in the
+background without blocking transcription.
 
 The agent decides which to call and when. The
 [`docs/example-workflow.md`](docs/example-workflow.md) prompt
