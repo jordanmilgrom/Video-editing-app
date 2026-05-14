@@ -15,6 +15,7 @@ import pytest
 
 from roughcut_core import multicam
 from roughcut_core.models import MulticamGroup, Segment, SpeakerLabel, Transcript
+from tests.conftest import requires_ffmpeg
 
 SR = 16_000
 
@@ -39,6 +40,7 @@ def _silence(duration_sec: float, sr: int = SR) -> np.ndarray:
     return np.zeros(int(duration_sec * sr), dtype=np.float32)
 
 
+@requires_ffmpeg
 def test_detect_groups_finds_two_synced_files(tmp_path: Path) -> None:
     # Both files share the same noise signal (mimicking real audio content),
     # but B has 1.0s of leading silence. Cross-correlation on noise has a
@@ -56,6 +58,7 @@ def test_detect_groups_finds_two_synced_files(tmp_path: Path) -> None:
     assert max(abs(o) for o in g.offsets_sec) == pytest.approx(1.0, abs=0.05)
 
 
+@requires_ffmpeg
 def test_diarize_by_mic_dominance_picks_louder_mic(tmp_path: Path) -> None:
     # Mic A: loud at [0, 1), silent at [1, 2). Mic B: opposite.
     a = np.concatenate([_tone(1.0, freq=440), _silence(1.0)])
