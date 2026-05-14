@@ -36,6 +36,8 @@ def _make_job(tmp_path: Path, args: dict) -> jobs.Job:
 
 
 def test_path_validation_rejects_relative_path() -> None:
+    # The transcribe_video MCP wrapper calls abs_file() before spawning;
+    # this exercises the same gate.
     from roughcut_mcp.responses import abs_file
     bad = abs_file("relative.wav")
     assert hasattr(bad, "ok") and bad.ok is False

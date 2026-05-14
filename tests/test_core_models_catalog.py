@@ -45,6 +45,7 @@ def test_inventory_marks_bundled_and_cached(
     (fake_bundle / "whisper-small").mkdir(parents=True)
     (fake_bundle / "whisper-small" / "weights.npz").write_text("x")
     monkeypatch.setattr(models_catalog, "bundled_dir", lambda: fake_bundle)
+    # Pretend the HF cache is empty.
     monkeypatch.setattr(models_catalog, "_hf_cache_has", lambda repo: False)
     items = models_catalog.inventory()
     by_name = {item["name"]: item for item in items}

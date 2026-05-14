@@ -15,6 +15,8 @@ from roughcut_core.models import Segment, Transcript
 
 
 def _write(cache_dir: Path, source_video: Path, segments: list[Segment]) -> Path:
+    """Drop a transcript JSON into cache_dir/transcripts/whatever/ to match
+    the layout `transcribe_video` produces."""
     sub = cache_dir / "transcripts" / "test"
     sub.mkdir(parents=True, exist_ok=True)
     t = Transcript(
@@ -25,6 +27,9 @@ def _write(cache_dir: Path, source_video: Path, segments: list[Segment]) -> Path
     path = sub / f"{source_video.stem}.json"
     path.write_text(t.model_dump_json(), encoding="utf-8")
     return path
+
+
+# ----- read_transcript ------------------------------------------------------
 
 
 def test_read_transcript_returns_all_segments_when_within_budget(tmp_path: Path) -> None:
@@ -47,11 +52,14 @@ def test_read_transcript_paginates_when_over_max_chars(tmp_path: Path) -> None:
     big = "x" * 500
     segments = [Segment(text=big, start=float(i), end=float(i + 1)) for i in range(10)]
     path = _write(tmp_path, src, segments)
+    # Cap small enough to force pagination after ~3 segments.
     first = documentary.read_transcript(path, max_chars=1500)
     assert first["has_more"] is True
     assert first["next_start"] is not None and first["next_start"] > 0
     second = documentary.read_transcript(path, start_segment=first["next_start"], max_chars=1500)
+    # Across the two pages we cover every segment with no overlap.
     seen = {s["idx"] for s in first["segments"]} | {s["idx"] for s in second["segments"]}
+    # On enough pages we eventually finish.
     while second["has_more"]:
         second = documentary.read_transcript(
             path, start_segment=second["next_start"], max_chars=1500,
@@ -68,8 +76,14 @@ def test_read_transcript_respects_explicit_end_segment(tmp_path: Path) -> None:
     ])
     out = documentary.read_transcript(path, start_segment=1, end_segment=3)
     assert [s["idx"] for s in out["segments"]] == [1, 2]
+    # The bounded request was satisfied, but segments 3 and 4 still exist
+    # in the transcript — has_more reflects "more on disk", not "more in
+    # the requested slice".
     assert out["has_more"] is True
     assert out["next_start"] == 3
+
+
+# ----- search_transcripts ---------------------------------------------------
 
 
 def test_search_transcripts_finds_substring_case_insensitive(tmp_path: Path) -> None:
@@ -126,6 +140,9 @@ def test_search_transcripts_empty_query_returns_no_results(tmp_path: Path) -> No
     _write(tmp_path, src, [Segment(text="hello", start=0.0, end=1.0)])
     out = documentary.search_transcripts("", tmp_path)
     assert out["result_count"] == 0
+
+
+# ----- summarize_clip -------------------------------------------------------
 
 
 def test_summarize_clip_returns_snippets_and_longest_segment(tmp_path: Path) -> None:
