@@ -15,13 +15,14 @@ from pathlib import Path
 
 
 def collect(cache_dir: Path) -> dict:
-    from roughcut_core import models_catalog
+    from roughcut_core import jobs, models_catalog
     return {
         "python": _python_info(),
         "ffmpeg": _binary_check("ffmpeg", ["-version"]),
         "ffprobe": _binary_check("ffprobe", ["-version"]),
         "mlx_whisper_importable": _mlx_whisper_check(),
         "models": _models_block(models_catalog.inventory()),
+        "workers": _workers_block(cache_dir, jobs),
         "cache_dir": _cache_dir_check(cache_dir),
         "disk_free_gb": _disk_free_gb(cache_dir),
         "env": {
@@ -33,12 +34,28 @@ def collect(cache_dir: Path) -> dict:
     }
 
 
-def _models_block(items: list[dict]) -> dict:
-    """Roll the models inventory into the {ok, ...} shape `collect` uses.
+def _workers_block(cache_dir: Path, jobs) -> dict:
+    """Surface the worker-pool config + the live queue depth."""
+    limit = jobs.pool_size()
+    live: list[int] = []
+    for slot in range(limit):
+        pid_file = jobs._worker_pid_path(cache_dir, slot)
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                if jobs._alive(pid):
+                    live.append(pid)
+            except (ValueError, OSError):
+                pass
+    return {
+        "ok": True,
+        "transcribe_concurrency_limit": limit,
+        "live_workers": live,
+        "queue_depth": jobs.queue_depth(cache_dir),
+    }
 
-    `ok=True` iff at least one model is on disk — otherwise the first
-    transcribe will block on a multi-minute download.
-    """
+
+def _models_block(items: list[dict]) -> dict:
     any_cached = any(m["cached"] for m in items)
     return {
         "ok": any_cached,
@@ -73,9 +90,8 @@ def _binary_check(name: str, probe: list[str]) -> dict:
 
 
 def _mlx_whisper_check() -> dict:
-    """Catches the libmlx.dylib regression class without doing a real transcribe."""
     try:
-        import mlx.core  # noqa: F401  (loads core.cpython-311-darwin.so → libmlx.dylib)
+        import mlx.core  # noqa: F401
         import mlx_whisper  # noqa: F401
         return {"ok": True}
     except Exception as e:  # noqa: BLE001
