@@ -60,11 +60,17 @@ echo "==> Fetch ffmpeg + ffprobe (macOS arm64) from npm"
 )
 
 echo "==> Download Python wheels (darwin/arm64, cp311)"
+# mlx-metal must be listed explicitly. mlx's METADATA marks it as
+# `Requires-Dist: mlx-metal==X; platform_system == "Darwin"`, but pip's
+# marker evaluation here uses the BUILD HOST's platform (Linux in CI),
+# not the --platform target, so the marker reads as False and mlx-metal
+# gets silently dropped. Without it, mlx/core.cpython-311-darwin.so loads
+# at import time and dyld fails to find @rpath/libmlx.dylib.
 python3 -m pip download \
   --dest "$BUILD/wheels" \
   "${PY_PLATFORMS[@]}" "${PY_FLAGS[@]}" \
   'pydantic>=2.7' 'Pillow>=10.3' 'mcp>=1.0' \
-  'mlx-whisper>=0.4' 'ffmpeg-python>=0.2.0' \
+  'mlx-whisper>=0.4' 'mlx-metal' 'ffmpeg-python>=0.2.0' \
   >/dev/null
 
 echo "==> Install wheels into server/lib"

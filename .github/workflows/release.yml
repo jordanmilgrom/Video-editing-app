@@ -1,18 +1,15 @@
-# Build roughcut.dxt and attach it to a GitHub Release on every vX.Y.Z tag.
+# Build roughcut.dxt on every vX.Y.Z tag, run an import smoke test on
+# a real macOS arm64 runner, and upload the artifact to the Release.
 #
-# Pushing a tag like `v0.5.0` triggers this workflow. It runs the same
-# `scripts/build-dxt.sh` developers run locally, and uploads the resulting
-# `roughcut.dxt` as a release asset. The Release is auto-created if it
-# doesn't already exist (e.g., a tag pushed without using `gh release create`).
-#
-# To cut a new release:
-#   1. Bump `version` in dxt/manifest.json AND pyproject.toml (lockstep).
-#   2. Commit + push to main.
-#   3. `git tag v0.X.Y && git push origin v0.X.Y` (or use gh release create).
-#
-# The runner is ubuntu-latest because build-dxt.sh cross-builds for darwin/arm64
-# (wheels are downloaded with explicit --platform macosx_*_arm64 tags, ffmpeg
-# comes from npm pre-built, python-build-standalone is a pre-built tarball).
+# Three jobs:
+#   1. build      — Linux-hosted cross-build. Outputs roughcut.dxt.
+#   2. smoke-test — macos-14 (arm64). Unpacks the .dxt, runs the bundled
+#                   python interpreter, imports mlx_whisper. Catches the
+#                   class of regression where a native dylib gets dropped
+#                   from the wheel set during cross-platform pip download.
+#   3. release    — Linux-hosted. Creates / updates the GitHub Release
+#                   and attaches roughcut.dxt. Only runs if smoke-test
+#                   passed.
 
 name: Release
 
@@ -22,21 +19,16 @@ on:
       - 'v*'
 
 jobs:
-  build-and-release:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python (build host only — the .dxt bundles its own runtime)
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Setup Node (for the @anthropic-ai/dxt CLI)
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
@@ -47,6 +39,57 @@ jobs:
         run: |
           test -f roughcut.dxt
           ls -lh roughcut.dxt
+
+      - name: Upload artifact for downstream jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: roughcut-dxt
+          path: roughcut.dxt
+          retention-days: 7
+
+  smoke-test:
+    needs: build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: roughcut-dxt
+
+      - name: Unpack the .dxt
+        run: |
+          mkdir unpacked
+          # .dxt files are zip archives.
+          unzip -q roughcut.dxt -d unpacked
+          test -x unpacked/server/python/bin/python3.11
+
+      - name: Import smoke test — mlx_whisper must load (catches missing libmlx.dylib)
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export PATH="$PWD/unpacked/server/python/bin:$PWD/unpacked/server/bin:$PATH"
+          python3.11 -c "
+          import sys, mlx, mlx.core, mlx_whisper
+          print(f'python  : {sys.version.split()[0]}')
+          print(f'mlx     : {mlx.__version__ if hasattr(mlx, \"__version__\") else \"unknown\"}')
+          print(f'mlx_whisper: {mlx_whisper.__version__}')
+          print('OK')
+          "
+
+      - name: ffmpeg / ffprobe must be executable
+        run: |
+          unpacked/server/bin/ffmpeg -version | head -1
+          unpacked/server/bin/ffprobe -version | head -1
+
+  release:
+    needs: smoke-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: roughcut-dxt
 
       - name: Create GitHub Release and upload .dxt
         uses: softprops/action-gh-release@v2
