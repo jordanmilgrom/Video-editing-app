@@ -17,8 +17,17 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".mxf"}
 GRID_COLS = 4
 GRID_ROWS = 4
 NUM_FRAMES = GRID_COLS * GRID_ROWS
+# Cell dimensions are now derived from `tile_size` (the long edge in
+# px). The constants below are kept only for back-compat with older
+# code paths that referenced them.
 CELL_W = 480
 CELL_H = 270
+
+# v0.6.5 P3 #14: shrink defaults so a 9-tile sheet of 16:9 frames lands
+# at ~600 KB instead of bumping into the 1 MB tool-result cap. Agents
+# that want larger tiles can pass tile_size up to ~512.
+DEFAULT_TILE_SIZE = 256
+DEFAULT_JPEG_QUALITY = 70
 
 
 def _load_font(size: int = 22) -> ImageFont.ImageFont:
@@ -79,30 +88,44 @@ def build_contact_sheet(
     *,
     overlay_timecodes: bool = True,
     num_frames: int = NUM_FRAMES,
+    tile_size: int = DEFAULT_TILE_SIZE,
+    jpeg_quality: int = DEFAULT_JPEG_QUALITY,
 ) -> list[float]:
     """Tile evenly-spaced frames into a contact sheet; return timestamps used.
 
-    The output PNG is `GRID_COLS * GRID_ROWS` cells. When
-    `overlay_timecodes` is True each cell is labeled with the source
+    The output JPEG is a `ceil(sqrt(num_frames)) × ceil(sqrt(num_frames))`
+    grid of cells. Each cell is `tile_size` × `tile_size * 9/16` (16:9
+    aspect). `tile_size` defaults to 256 so a 9-frame sheet lands at
+    ~600 KB after JPEG encoding; bump to 384 or 512 for higher detail.
+
+    When `overlay_timecodes` is True each cell is labeled with the source
     timestamp (in seconds) of the frame it shows.
     """
     timestamps = _frame_timestamps(duration, n=num_frames)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    sheet = Image.new("RGB", (CELL_W * GRID_COLS, CELL_H * GRID_ROWS), (0, 0, 0))
+    # Square-ish grid layout sized to fit the requested num_frames.
+    import math
+    cols = int(math.ceil(math.sqrt(max(1, num_frames))))
+    rows = int(math.ceil(num_frames / cols))
+    cell_w = max(64, int(tile_size))
+    cell_h = max(36, int(cell_w * 9 // 16))
+    sheet = Image.new("RGB", (cell_w * cols, cell_h * rows), (0, 0, 0))
     draw = ImageDraw.Draw(sheet)
     font = _load_font() if overlay_timecodes else None
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, t in enumerate(timestamps):
             frame_path = Path(tmpdir) / f"f{i:02d}.jpg"
             _extract_frame(media_path, t, frame_path)
-            img = Image.open(frame_path).convert("RGB").resize((CELL_W, CELL_H))
-            col, row = i % GRID_COLS, i // GRID_COLS
-            sheet.paste(img, (col * CELL_W, row * CELL_H))
+            img = Image.open(frame_path).convert("RGB").resize((cell_w, cell_h))
+            col, row = i % cols, i // cols
+            sheet.paste(img, (col * cell_w, row * cell_h))
             if overlay_timecodes and font is not None:
-                _label_cell(draw, font, f"{t:.2f}s", col * CELL_W + 8, row * CELL_H + 6)
+                _label_cell(draw, font, f"{t:.2f}s",
+                            col * cell_w + 8, row * cell_h + 6)
     # JPEG (not PNG) and a quality cap, so the encoded sheet stays well
     # under Claude Desktop's 1 MB tool-result cap when sent inline.
-    sheet.save(out_path, format="JPEG", quality=75, optimize=True)
+    sheet.save(out_path, format="JPEG",
+               quality=max(1, min(95, int(jpeg_quality))), optimize=True)
     return timestamps
 
 
