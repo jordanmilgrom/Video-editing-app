@@ -36,8 +36,6 @@ def _make_job(tmp_path: Path, args: dict) -> jobs.Job:
 
 
 def test_path_validation_rejects_relative_path() -> None:
-    # The transcribe_video MCP wrapper calls abs_file() before spawning;
-    # this exercises the same gate.
     from roughcut_mcp.responses import abs_file
     bad = abs_file("relative.wav")
     assert hasattr(bad, "ok") and bad.ok is False
@@ -84,7 +82,7 @@ def test_worker_handler_forwards_language(
     cache = tmp_path / "c"
     cache.mkdir()
     worker._do_transcribe_video(_make_job(tmp_path, {
-        "video_path": str(tiny_wav), "language": "auto", "model": "m",
+        "video_path": str(tiny_wav), "language": "auto", "model": "mlx-community/whisper-small-mlx",
     }), cache)
     assert received["language"] is None
 
@@ -92,6 +90,6 @@ def test_worker_handler_forwards_language(
     cache2 = tmp_path / "c2"
     cache2.mkdir()
     worker._do_transcribe_video(_make_job(tmp_path, {
-        "video_path": str(tiny_wav), "language": "es", "model": "m",
+        "video_path": str(tiny_wav), "language": "es", "model": "mlx-community/whisper-small-mlx",
     }), cache2)
     assert received["language"] == "es"

@@ -63,6 +63,18 @@ TRANSCRIBE_VIDEO = (
     "the downstream tools (`cluster_takes_by_silence`, "
     "`align_takes_to_script`, `diarize_speakers`, "
     "`pick_angle_per_segment`) consume.\n\n"
+    "**Model defaults to `'small'`** (~480 MB, bundled in the .dxt — "
+    "zero-download first run, plenty accurate for clear-speaker "
+    "podcast / interview / scripted-VO content). Other choices: "
+    "`'medium'`, `'large-v3'` (best quality, ~3 GB, English-strong but "
+    "polyglot), `'large-v3-turbo'` (large-v3 quality at ~half the "
+    "size and ~2x speed). Power users can pass an `org/repo` HF id "
+    "directly.\n\n"
+    "If the requested model isn't on disk, the job auto-downloads it "
+    "as step 1 — `check_job_status` reports `current_step` so you can "
+    "tell whether you're waiting on download or on transcription. To "
+    "pre-fetch a bigger model without blocking transcription, call "
+    "`prewarm_model('large-v3')` separately.\n\n"
     "Call on interview / podcast clips, not b-roll. Use "
     "`language=\"auto\"` unless you know the code."
 ) + _ASYNC_NOTE
@@ -139,3 +151,15 @@ RESUME_JOB = (
     "If the job already succeeded, returns the cached result and does "
     "no work. If still running, returns an error — `cancel_job` first."
 )
+
+PREWARM_MODEL = (
+    "Pre-fetch a whisper model in the background so a later transcribe "
+    "is instant. Use this when you know the user will need `large-v3` "
+    "but you don't want to block their first transcription on a "
+    "multi-minute download.\n\n"
+    "Choices: `'small'` (~480 MB, bundled — already cached), "
+    "`'medium'` (~1.5 GB), `'large-v3'` (~3 GB, best quality), "
+    "`'large-v3-turbo'` (~1.6 GB, large-v3 quality at 2x speed). "
+    "Idempotent: spawning a prewarm for an already-cached model "
+    "returns instantly with `already_cached: true`."
+) + _ASYNC_NOTE

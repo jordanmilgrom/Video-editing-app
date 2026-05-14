@@ -73,11 +73,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if job.status == "succeeded" else 1
 
 
-# ---------------------------------------------------------------------------
-# Tool-specific dispatchers
-# ---------------------------------------------------------------------------
-
-
 def _dispatch(job: jobs.Job, cache_dir: Path) -> tuple[Path | None, dict]:
     handler = _HANDLERS.get(job.tool_name)
     if handler is None:
@@ -86,25 +81,63 @@ def _dispatch(job: jobs.Job, cache_dir: Path) -> tuple[Path | None, dict]:
 
 
 def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
-    from roughcut_core import transcribe
+    from roughcut_core import models_catalog, transcribe
     args = job.args
     path = Path(args["video_path"]).resolve()
-    model = args.get("model", transcribe.DEFAULT_WHISPER_MODEL)
+    requested_model = args.get("model") or models_catalog.DEFAULT_MODEL
     lang = args.get("language")
     if lang and lang.lower() == "auto":
         lang = None
-    _step(job, cache_dir, "extracting audio + transcribing", progress=10.0)
-    t = transcribe.transcribe(path, cache_dir, model=model, language=lang)
-    transcript_path = cache_dir / "transcripts" / transcribe._safe_model(model) / f"{transcribe.cache_key(path)}.json"
+
+    # Auto-prewarm: if the requested model isn't on disk yet, fetch it
+    # in-flight so the user never has to think about a separate download.
+    if requested_model in models_catalog.SHORT_TO_HF and not models_catalog.is_cached(requested_model):
+        size = models_catalog.APPROX_SIZE_MB.get(requested_model, 0)
+        _step(job, cache_dir, f"downloading whisper-{requested_model} (~{size} MB)", progress=5.0)
+        _download_hf_model(models_catalog.SHORT_TO_HF[requested_model])
+
+    model_arg = models_catalog.resolve(requested_model)
+    _step(job, cache_dir, "extracting audio + transcribing", progress=30.0)
+    t = transcribe.transcribe(path, cache_dir, model=model_arg, language=lang)
+    # Cache key uses the short name so the on-disk transcript path is
+    # stable across "small" vs "/abs/path/to/small" resolutions.
+    transcript_path = cache_dir / "transcripts" / transcribe._safe_model(requested_model) / f"{transcribe.cache_key(path)}.json"
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    if not transcript_path.exists():
+        transcript_path.write_text(t.model_dump_json(), encoding="utf-8")
     full_text = " ".join(s.text.strip() for s in t.segments).strip()
     summary = {
         "transcript_path": str(transcript_path),
         "segment_count": len(t.segments),
         "duration_sec": round(t.duration, 3),
         "language": t.language,
+        "model": requested_model,
         "first_200_chars": full_text[:200],
     }
     return transcript_path, summary
+
+
+def _do_prewarm_model(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
+    """Download a whisper model in the background so a later transcribe is instant."""
+    from roughcut_core import models_catalog
+    name = job.args["model_name"]
+    if name not in models_catalog.SHORT_TO_HF:
+        raise ValueError(
+            f"unknown model '{name}'. Choices: {list(models_catalog.SHORT_TO_HF)}"
+        )
+    if models_catalog.is_cached(name):
+        return None, {"model_name": name, "already_cached": True}
+    repo = models_catalog.SHORT_TO_HF[name]
+    size = models_catalog.APPROX_SIZE_MB.get(name, 0)
+    _step(job, cache_dir, f"downloading {repo} (~{size} MB)", progress=5.0)
+    _download_hf_model(repo)
+    return None, {"model_name": name, "hf_repo": repo, "downloaded": True}
+
+
+def _download_hf_model(repo_id: str) -> None:
+    """Pull the full repo snapshot into the HF cache. Lazy import."""
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo_id=repo_id)
 
 
 def _do_cluster(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
@@ -219,14 +252,11 @@ def _do_pick_angle(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
 
 
 def _do_test_noop(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
-    """Test-only: succeed instantly. Lets tests exercise the lifecycle
-    without dragging in mlx-whisper or scipy at worker import time."""
     time.sleep(0.05)
     return None, {"echo": "ok"}
 
 
 def _do_test_sleep(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
-    """Test-only: sleeps long enough to be cancelled."""
     seconds = float(job.args.get("seconds", 5))
     end = time.time() + seconds
     while time.time() < end:
@@ -236,7 +266,6 @@ def _do_test_sleep(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
 
 
 def _do_test_boom(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
-    """Test-only: raises so we can assert traceback capture."""
     raise RuntimeError("intentional test failure")
 
 
@@ -247,6 +276,7 @@ _HANDLERS = {
     "detect_multicam_groups": _do_detect_multicam,
     "diarize_speakers": _do_diarize,
     "pick_angle_per_segment": _do_pick_angle,
+    "prewarm_model": _do_prewarm_model,
     "_test_noop": _do_test_noop,
     "_test_sleep": _do_test_sleep,
     "_test_boom": _do_test_boom,
@@ -261,7 +291,6 @@ def _step(job: jobs.Job, cache_dir: Path, step: str, progress: float | None = No
 
 
 def _hint_for(exc: Exception) -> str | None:
-    """Map common errors to a short actionable hint the agent can show."""
     msg = str(exc).lower()
     if "libmlx" in msg or "@rpath" in msg:
         return ("The bundled libmlx.dylib didn't load. Rebuild the .dxt — "
