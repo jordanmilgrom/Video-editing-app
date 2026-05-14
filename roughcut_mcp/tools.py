@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import TextContent
 
-from roughcut_core import broll, cache_io, clips, documentary, fcpxml, jobs, models_catalog, system_status, transcribe
+from roughcut_core import broll, cache_io, clips, documentary, edl, fcp7_xml, fcpxml, jobs, models_catalog, system_status, transcribe
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
 from roughcut_mcp.responses import ToolResponse, abs_dir, abs_file, abs_path, cache_dir, to_error
@@ -191,8 +191,10 @@ def register_tools(mcp: FastMCP) -> None:
         return _check_job_status(job_id)
 
     @mcp.tool(description=desc.LIST_JOBS)
-    def list_jobs(status: str | None = None, limit: int = 20) -> ToolResponse:
-        return _list_jobs(status, limit)
+    def list_jobs(
+        status: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> ToolResponse:
+        return _list_jobs(status, limit, offset)
 
     @mcp.tool(description=desc.CANCEL_JOB)
     def cancel_job(job_id: str) -> ToolResponse:
@@ -201,6 +203,10 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.RESUME_JOB)
     def resume_job(job_id: str) -> ToolResponse:
         return _resume_job(job_id)
+
+    @mcp.tool(description=desc.RESTART_WORKERS)
+    def restart_workers() -> ToolResponse:
+        return _restart_workers()
 
 
 # ---------------------------------------------------------------------------
@@ -247,20 +253,37 @@ def _check_job_status(job_id: str) -> ToolResponse:
     return ToolResponse(ok=True, summary=job.model_dump(mode="json"))
 
 
-def _list_jobs(status: str | None, limit: int) -> ToolResponse:
+def _list_jobs(status: str | None, limit: int, offset: int) -> ToolResponse:
     cdir = cache_dir(None)
     js = jobs.list_jobs(cdir, status=status)  # type: ignore[arg-type]
+    capped = max(1, min(1000, int(limit or 100)))
+    start = max(0, int(offset or 0))
+    page = js[start : start + capped]
     summary = {
-        "job_count": len(js),
+        "total_count": len(js),
+        "returned_count": len(page),
+        "offset": start,
+        "limit": capped,
+        "next_offset": (start + len(page)) if (start + len(page)) < len(js) else None,
         "jobs": [
             {"job_id": j.job_id, "tool_name": j.tool_name, "status": j.status,
              "started_at": j.started_at, "current_step": j.current_step,
              "progress_pct": j.progress_pct, "result_path": j.result_path,
              "error": j.error}
-            for j in js[: max(1, limit)]
+            for j in page
         ],
     }
     return ToolResponse(ok=True, summary=summary)
+
+
+def _restart_workers() -> ToolResponse:
+    cdir = cache_dir(None)
+    try:
+        result = jobs.restart_workers(cdir)
+    except Exception as e:  # noqa: BLE001
+        log.exception("restart_workers failed")
+        return to_error(e)
+    return ToolResponse(ok=True, summary=result)
 
 
 def _cancel_job(job_id: str) -> ToolResponse:
@@ -331,6 +354,16 @@ def _list_clips(folder: str, recursive: bool) -> ToolResponse:
 
 
 def _generate_fcpxml(sequence_spec_data: dict, output_path: str) -> ToolResponse:
+    """Emit three timeline formats from one tool call.
+
+    v0.6.4: a single generate_fcpxml call now writes FCPXML 1.10
+    (Final Cut), FCP 7 XMEML (Premiere's most reliable path), and a
+    CMX 3600 EDL (universal V1 fallback). The three siblings get the
+    same basename: `cut.fcpxml`, `cut.xml`, `cut.edl`. Earlier versions
+    emitted only the FCPXML, which Final Cut now rejects at import
+    because of a missing `<media-rep>` element. We fix that AND give
+    every NLE its preferred format in the same call.
+    """
     out = abs_path(output_path)
     if isinstance(out, ToolResponse):
         return out
@@ -342,14 +375,27 @@ def _generate_fcpxml(sequence_spec_data: dict, output_path: str) -> ToolResponse
     if not spec.aroll:
         return ToolResponse(ok=False, error="invalid_spec",
                             message="SequenceSpec.aroll is empty")
+    fcpxml_path = out.with_suffix(".fcpxml")
+    fcp7_path = out.with_suffix(".xml")
+    edl_path = out.with_suffix(".edl")
     try:
-        fcpxml.write_fcpxml(spec, out)
+        fcpxml.write_fcpxml(spec, fcpxml_path)
+        fcp7_xml.write_fcp7_xml(spec, fcp7_path)
+        edl.write_edl(spec, edl_path)
     except Exception as e:  # noqa: BLE001
         log.exception("generate_fcpxml failed")
         return to_error(e)
-    return ToolResponse(ok=True, output_path=str(out), summary={
+    return ToolResponse(ok=True, output_path=str(fcpxml_path), summary={
+        "fcpxml_path": str(fcpxml_path),
+        "fcp7_xml_path": str(fcp7_path),
+        "edl_path": str(edl_path),
         "aroll_count": len(spec.aroll), "broll_count": len(spec.broll),
         "duration_sec": round(sum(s.out_sec - s.in_sec for s in spec.aroll), 3),
+        "import_hints": {
+            "final_cut_pro": str(fcpxml_path),
+            "premiere_pro": str(fcp7_path),
+            "fallback_any_nle": str(edl_path),
+        },
     })
 
 

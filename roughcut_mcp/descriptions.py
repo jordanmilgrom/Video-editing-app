@@ -28,10 +28,20 @@ GET_SYSTEM_STATUS = (
 )
 
 GENERATE_FCPXML = (
-    "Assemble an FCPXML v1.10 timeline from a SequenceSpec and write "
-    "it to disk. A-roll on V1, b-roll inserts on V2. Synchronous.\n\n"
-    "Call this LAST in doc/interview mode. `output_path` MUST be "
-    "absolute and end with `.fcpxml`."
+    "Write three timeline files from one call: FCPXML 1.10 for Final "
+    "Cut, FCP 7 XMEML for Premiere, CMX 3600 EDL as a universal "
+    "fallback. All three share the same basename derived from "
+    "`output_path` (so `/cut.fcpxml` writes `cut.fcpxml`, `cut.xml`, "
+    "and `cut.edl` side by side). A-roll on V1, b-roll inserts on V2. "
+    "Synchronous.\n\n"
+    "Why three: Final Cut and Premiere have notoriously inconsistent "
+    "FCPXML support, and the v0.6.3 emitter produced output Final Cut "
+    "wouldn't validate. v0.6.4's FCPXML is now DTD-compliant; FCP 7 "
+    "XML is Premiere's most reliable import path; EDL works in every "
+    "NLE on Earth as a single-track fallback (b-roll is noted in "
+    "comments but not laid out on V2).\n\n"
+    "Call this LAST. The summary's `import_hints` field tells you "
+    "which file to point each NLE at."
 )
 
 EXTRACT_FRAME_GRID = (
@@ -132,10 +142,24 @@ CHECK_JOB_STATUS = (
 LIST_JOBS = (
     "List recent jobs in this cache dir. Use to recover context after "
     "starting a fresh chat: any earlier transcription / clustering / "
-    "diarization that completed shows up here with its result_path.\n\n"
-    "Optional `status` filter: one of started/running/succeeded/"
-    "failed/cancelled/interrupted. `limit` caps the result count "
-    "(default 20)."
+    "diarization that completed shows up here with its `result_path`.\n\n"
+    "Pagination (v0.6.4): `limit` defaults to 100, capped at 1000. "
+    "`offset` defaults to 0. The summary returns `total_count`, "
+    "`returned_count`, and `next_offset` so you can page deterministically "
+    "instead of guessing what got truncated. Optional `status` filter "
+    "(started/queued/running/succeeded/failed/cancelled/interrupted)."
+)
+
+
+RESTART_WORKERS = (
+    "Self-heal: kill every live worker subprocess, then respawn the "
+    "configured pool. Use when the agent or user reports the server is "
+    "wedged — jobs sitting in `running` forever, `list_jobs` returning "
+    "stale state, etc. Cheaper than asking the user to toggle the "
+    "Claude Desktop extension off and back on.\n\n"
+    "Any in-flight `running` jobs whose worker we kill get flipped to "
+    "`interrupted` first so `check_job_status` reflects reality. The "
+    "queue is preserved; the new workers drain it from the front."
 )
 
 CANCEL_JOB = (
@@ -175,13 +199,15 @@ SEARCH_TRANSCRIPTS = (
 )
 
 SUMMARIZE_CLIP = (
-    "Deterministic snippet view of one clip's transcript: opening "
-    "200 chars, closing 200 chars, longest continuous segment, total "
-    "speech length, segment count, duration. NO LLM call — just facts "
-    "about the transcript shape.\n\n"
-    "Use this to scan many clips fast after a batch `transcribe_video` "
-    "pass, then `read_transcript` only the ones that look interesting. "
-    "Synchronous."
+    "**No LLM call. Returns in milliseconds. Deterministic.** Snippet "
+    "view of one clip's transcript: first 200 chars (`opening_200_chars`), "
+    "last 200 chars (`closing_200_chars`), the longest continuous "
+    "segment (`longest_segment_text` + start/end timecodes), total "
+    "speech char count, segment count, duration.\n\n"
+    "Designed for fast batch scanning: call `summarize_clip` on each "
+    "of N transcripts in parallel, decide which clips look interesting, "
+    "then `read_transcript` only those in full. Synchronous — no "
+    "job_id, no polling."
 )
 
 PREWARM_MODEL = (

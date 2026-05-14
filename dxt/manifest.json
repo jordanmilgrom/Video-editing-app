@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "roughcut",
   "display_name": "roughcut — AI rough-cut assistant",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "First-draft video editor driven by your Claude agent. Bundles whisper-small for offline first-run transcription. Doc/interview and multicam podcast modes. Long-running work runs as background jobs that survive Claude Desktop restarts.",
   "long_description": "Point roughcut at a folder of interview footage and a folder of b-roll. The agent picks the cleanest takes, decides where b-roll fits, and writes a Premiere / DaVinci Resolve project file. roughcut does the deterministic work (transcribe, cluster takes, contact-sheet frames, build FCPXML); your Claude subscription pays for the reasoning. macOS Apple Silicon only.",
   "author": {
@@ -37,7 +37,8 @@
     {"name": "align_takes_to_script", "description": "Spawn a script-alignment job; returns job_id."},
     {"name": "extract_frame_grid", "description": "Sample frames from a clip into a contact sheet (sync)."},
     {"name": "get_clip_thumbnail", "description": "Extract one frame at a specific timecode (sync)."},
-    {"name": "generate_fcpxml", "description": "Write FCPXML v1.10 to disk from a SequenceSpec (sync)."},
+    {"name": "generate_fcpxml", "description": "Write FCPXML 1.10 + FCP 7 XML + EDL from one SequenceSpec (sync)."},
+    {"name": "restart_workers", "description": "Self-heal: kill all workers + respawn (sync)."},
     {"name": "detect_multicam_groups", "description": "Spawn an audio-sync grouping job; returns job_id."},
     {"name": "diarize_speakers", "description": "Spawn a mic-RMS diarization job; returns job_id."},
     {"name": "pick_angle_per_segment", "description": "Spawn an angle-picking job; returns job_id."},

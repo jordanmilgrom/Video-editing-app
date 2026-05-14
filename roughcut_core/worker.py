@@ -159,6 +159,17 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
         "language": t.language,
         "model": requested_model,
         "first_200_chars": full_text[:200],
+        # Discoverability: chat-side Claude shouldn't have to stumble onto
+        # the docs-mode tools by accident. Surface them in every transcribe
+        # result so a fresh agent knows the obvious next moves.
+        "next_tools": [
+            {"name": "summarize_clip",
+             "what": "Deterministic snippet view (no LLM) — opening/closing 200 chars + longest segment."},
+            {"name": "read_transcript",
+             "what": "Page through the full transcript in ~900 KB chunks (use start_segment/next_start)."},
+            {"name": "search_transcripts",
+             "what": "Case-insensitive substring search across every cached transcript."},
+        ],
     }
     return transcript_path, summary
 

@@ -54,7 +54,11 @@ def test_fcpxml_writes_valid_structure(tmp_path: Path) -> None:
     assets = root.findall("./resources/asset")
     assert len(assets) == 2
     for a in assets:
-        assert a.attrib["src"].startswith("file://")
+        # v0.6.4: FCPXML 1.10 DTD requires <media-rep> child, not src attr.
+        assert "src" not in a.attrib
+        rep = a.find("media-rep")
+        assert rep is not None and rep.attrib["src"].startswith("file://")
+        assert rep.attrib["kind"] == "original-media"
 
     spine_clips = root.findall("./library/event/project/sequence/spine/asset-clip")
     assert len(spine_clips) == 1

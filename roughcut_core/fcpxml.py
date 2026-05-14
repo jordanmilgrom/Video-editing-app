@@ -128,10 +128,9 @@ def _emit_assets(resources: ET.Element, spec: SequenceSpec,
         aid = f"r{i}"
         asset_ids[path] = aid
         dur = _asset_duration(path, spec)
-        ET.SubElement(resources, "asset", {
+        asset = ET.SubElement(resources, "asset", {
             "id": aid,
             "name": path.stem,
-            "src": Path(path).resolve().as_uri(),
             "start": "0s",
             "duration": _t(dur, fps_num, fps_den),
             "hasVideo": "1",
@@ -141,6 +140,13 @@ def _emit_assets(resources: ET.Element, spec: SequenceSpec,
             "audioSources": "1",
             "audioChannels": "2",
             "audioRate": "48000",
+        })
+        # DTD 1.10 requires `<media-rep>` as a child; `src` on the asset
+        # element itself was deprecated long ago and the validator rejects
+        # the document outright (no declaration for attribute src of asset).
+        ET.SubElement(asset, "media-rep", {
+            "kind": "original-media",
+            "src": Path(path).resolve().as_uri(),
         })
     return asset_ids
 
@@ -232,12 +238,16 @@ def write_multicam_fcpxml(
         aid = f"r{i}"
         asset_ids[p] = aid
         dur = max(s.clip_out_sec for s in selections if s.clip_path == p)
-        ET.SubElement(resources, "asset", {
-            "id": aid, "name": Path(p).stem, "src": Path(p).resolve().as_uri(),
+        asset = ET.SubElement(resources, "asset", {
+            "id": aid, "name": Path(p).stem,
             "start": "0s", "duration": _t(dur, fps_num, fps_den),
             "hasVideo": "1", "hasAudio": "1", "format": "r0",
             "videoSources": "1", "audioSources": "1",
             "audioChannels": "2", "audioRate": "48000",
+        })
+        ET.SubElement(asset, "media-rep", {
+            "kind": "original-media",
+            "src": Path(p).resolve().as_uri(),
         })
 
     library = ET.SubElement(fcpxml, "library")

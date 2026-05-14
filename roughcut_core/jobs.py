@@ -59,10 +59,13 @@ ASYNC_TOOLS = frozenset({
     "pick_angle_per_segment",
 })
 
-# Concurrency cap for the persistent worker pool. mlx-whisper on Apple
-# Silicon doesn't parallelize across whisper instances usefully; the
-# default is 1. Power users can bump via ROUGHCUT_WORKER_POOL_SIZE.
-DEFAULT_POOL_SIZE = 1
+# Concurrency cap for the persistent worker pool. Default 4: empirically
+# strikes the right balance on M-series Macs for the whisper-small /
+# whisper-medium models. Beyond 4, GPU contention dominates and the
+# average per-job time goes up. v0.6.3 shipped with default 1 — too
+# conservative for editors firing batch transcriptions across 30+ clips.
+# Power users tune via ROUGHCUT_WORKER_POOL_SIZE.
+DEFAULT_POOL_SIZE = 4
 
 
 def pool_size() -> int:
@@ -318,6 +321,40 @@ def cancel(cache_dir: Path, job_id: str) -> Job:
     job.current_step = "cancelled"
     write(cache_dir, job)
     return job
+
+
+def restart_workers(cache_dir: Path) -> dict:
+    """Kill every live worker, drop pid + queue lock files, respawn the pool.
+
+    Self-heal for when the MCP server reports workers alive but the user
+    can't get a job through. `cancel_job` only signals one worker at a
+    time; this is the heavier hammer the `restart_workers` MCP tool wraps.
+    """
+    killed: list[int] = []
+    for slot in range(pool_size()):
+        pid_file = _worker_pid_path(cache_dir, slot)
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                if _alive(pid):
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGTERM)
+                        killed.append(pid)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+            except (ValueError, OSError):
+                pass
+            pid_file.unlink(missing_ok=True)
+    # Any "running" jobs whose worker just died need to be flipped before
+    # we respawn, otherwise check_job_status reports stale "running" forever.
+    touched = recover_interrupted(cache_dir)
+    fresh_pids = _ensure_workers(cache_dir)
+    return {
+        "killed_pids": killed,
+        "interrupted_jobs": [j.job_id for j in touched],
+        "new_pids": fresh_pids,
+        "queue_depth": queue_depth(cache_dir),
+    }
 
 
 def recover_interrupted(cache_dir: Path) -> list[Job]:

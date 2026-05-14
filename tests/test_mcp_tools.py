@@ -118,6 +118,8 @@ def test_build_server_registers_expected_tools() -> None:
     assert {"read_transcript", "search_transcripts", "summarize_clip"}.issubset(names)
     # Prewarm tool (v0.6.1)
     assert "prewarm_model" in names
+    # v0.6.4: self-heal
+    assert "restart_workers" in names
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:
@@ -138,9 +140,12 @@ def test_check_job_status_returns_not_a_file_for_unknown_id(isolated_cache: Path
 
 
 def test_list_jobs_returns_empty_when_cache_is_fresh(isolated_cache: Path) -> None:
-    res = tools._list_jobs(None, 20)
+    res = tools._list_jobs(None, 100, 0)
     assert res.ok is True
-    assert (res.summary or {})["job_count"] == 0
+    # v0.6.4: pagination — total_count + returned_count instead of job_count.
+    assert (res.summary or {})["total_count"] == 0
+    assert (res.summary or {})["returned_count"] == 0
+    assert (res.summary or {})["next_offset"] is None
 
 
 def test_resume_job_returns_succeeded_immediately_when_cached(
