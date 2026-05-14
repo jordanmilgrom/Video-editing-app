@@ -32,7 +32,19 @@ from roughcut_core.models import (
 
 
 class ToolResponse(BaseModel):
-    """Single envelope shape every tool's success/failure path emits."""
+    """Single envelope shape every tool's success/failure path emits.
+
+    v0.6.5 introduced `data` as the canonical name for the rich result
+    dict (the field was previously called `summary`, which is misleading
+    since the payload is full results, not a summary). For back-compat
+    the `summary` field is kept and mirrored bidirectionally — tools and
+    callers can use either name during the transition. Both forms appear
+    in the serialized JSON so agents trained on the old shape still work.
+
+    `next_steps` is new: tools point at the obvious downstream calls
+    (with example args) so a fresh agent can chain without rummaging
+    through descriptions.
+    """
 
     ok: bool
     clips: list[ClipMeta] = Field(default_factory=list)
@@ -40,9 +52,19 @@ class ToolResponse(BaseModel):
     clusters: list[TakeCluster] = Field(default_factory=list)
     alignments: list[ScriptAlignment] = Field(default_factory=list)
     output_path: str | None = None
+    data: dict | None = None
     summary: dict | None = None
+    next_steps: dict | None = None
     error: str | None = None
     message: str | None = None
+
+    def model_post_init(self, _ctx) -> None:
+        # Mirror data <-> summary so old + new code paths see the same
+        # dict regardless of which name the caller used at construction.
+        if self.data is None and self.summary is not None:
+            object.__setattr__(self, "data", self.summary)
+        elif self.summary is None and self.data is not None:
+            object.__setattr__(self, "summary", self.data)
 
 
 def cache_dir(override: str | None) -> Path:
