@@ -57,11 +57,17 @@ def is_bundled(short_name: str) -> bool:
 def resolve(name: str) -> str:
     """Turn a user-facing name into something mlx-whisper accepts.
 
-    - Anything containing `/` is assumed to be an HF repo id and passed
-      through (escape hatch for power users).
-    - Otherwise the short name maps to its mlx-community repo. If we've
-      bundled that model, returns the absolute local path so transcription
-      is fully offline.
+    Resolution order, first hit wins:
+      1. Anything containing `/` is assumed to be an HF repo id and
+         passed through (escape hatch for power users).
+      2. The bundled directory (`server/models/<short>/`) — what the
+         shipped .dxt drops on disk at build time.
+      3. The HuggingFace hub cache (`~/.cache/huggingface/hub/...`) —
+         where `prewarm_model` (and any prior `transcribe_video`
+         download) deposits models.
+      4. Last resort: the `org/repo` string itself, which signals to
+         downstream callers (mlx-whisper / `prewarm_model`) that a
+         download is required.
     """
     if "/" in name:
         return name
@@ -71,8 +77,12 @@ def resolve(name: str) -> str:
             f"unknown model '{name}'. Choices: {list(SHORT_TO_HF)} "
             f"(or pass a 'org/repo' HF id directly)"
         )
-    if is_bundled(name):
-        return str(bundled_path(name).resolve())
+    bp = bundled_path(name)
+    if bp.is_dir() and any(bp.iterdir()):
+        return str(bp.resolve())
+    cached = hf_cache_snapshot_path(repo)
+    if cached:
+        return cached
     return repo
 
 
@@ -100,6 +110,29 @@ def _hf_cache_has(repo_id: str | None) -> bool:
         return False
     safe = repo_id.replace("/", "--")
     return bool(list(root.rglob(f"models--{safe}")))
+
+
+def hf_cache_snapshot_path(repo_id: str | None) -> str | None:
+    """Locate a usable on-disk snapshot for `repo_id` in the HF hub cache.
+
+    HF stores models at `~/.cache/huggingface/hub/models--ORG--REPO/
+    snapshots/<commit>/`. A snapshot dir with at least one file is the
+    canonical "model is downloaded" state. Returns the absolute path of
+    the first usable snapshot, else None.
+    """
+    if not repo_id:
+        return None
+    root = _hf_cache_root()
+    if not root.is_dir():
+        return None
+    safe = repo_id.replace("/", "--")
+    for d in root.rglob(f"models--{safe}"):
+        snapshots = d / "snapshots"
+        if snapshots.is_dir():
+            for snap in snapshots.iterdir():
+                if snap.is_dir() and any(snap.iterdir()):
+                    return str(snap.resolve())
+    return None
 
 
 def _hf_cache_size_mb(repo_id: str | None) -> int | None:

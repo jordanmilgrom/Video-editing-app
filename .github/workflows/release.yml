@@ -50,9 +50,13 @@ jobs:
   smoke-test:
     needs: build
     runs-on: macos-14
+    # No actions/checkout here — and that's intentional. With the repo
+    # checked out at $PWD, Python's cwd-based import machinery would
+    # load roughcut_core from the REPO copy (where models_catalog.py's
+    # __file__ resolves to repo/models, which doesn't exist) instead of
+    # the unpacked .dxt copy (where the bundled whisper-small lives).
+    # Surfaced as: AssertionError: resolved 'small' to non-path: …
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           name: roughcut-dxt
