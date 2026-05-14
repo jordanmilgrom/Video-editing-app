@@ -40,9 +40,13 @@ jobs:
   smoke-test:
     needs: build
     runs-on: macos-14
+    # No actions/checkout here — and that's intentional. With the repo
+    # checked out at $PWD, Python's cwd-based import machinery would
+    # load roughcut_core from the REPO copy (where models_catalog.py's
+    # __file__ resolves to repo/models, which doesn't exist) instead of
+    # the unpacked .dxt copy (where the bundled whisper-small lives).
+    # Surfaced as: AssertionError: resolved 'small' to non-path: …
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           name: roughcut-dxt
@@ -53,7 +57,7 @@ jobs:
           unzip -q roughcut.dxt -d unpacked
           test -x unpacked/server/python/bin/python3.11
 
-      - name: Import smoke test — mlx_whisper must load (catches missing libmlx.dylib)
+      - name: Import smoke test — mlx_whisper must load
         run: |
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export PATH="$PWD/unpacked/server/python/bin:$PWD/unpacked/server/bin:$PATH"
@@ -71,7 +75,7 @@ jobs:
           unpacked/server/bin/ffmpeg -version | head -1
           unpacked/server/bin/ffprobe -version | head -1
 
-      - name: whisper-small must be bundled (v0.6.1 promise)
+      - name: whisper-small must be bundled
         run: |
           test -d unpacked/server/models/whisper-small
           test -f unpacked/server/models/whisper-small/config.json
@@ -112,8 +116,6 @@ jobs:
 
           j = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
           assert j.job_id, f"no job_id: {j}"
-          print(f"spawned job_id={j.job_id} status={j.status}")
-
           deadline = time.time() + 10
           last = j
           while time.time() < deadline:
@@ -121,9 +123,8 @@ jobs:
               if last and last.status in {"succeeded", "failed"}:
                   break
               time.sleep(0.1)
-          assert last.status == "succeeded", f"job didn't succeed: {last}"
+          assert last.status == "succeeded", last
           assert last.result_summary == {"echo": "ok"}, last.result_summary
-          print(f"job succeeded: result_summary={last.result_summary}")
 
           j2 = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
           assert j2.job_id == j.job_id and j2.status == "succeeded"
@@ -134,8 +135,7 @@ jobs:
               pid=999_999_999,
           )
           jobs.write(cache, fake)
-          out = jobs.cancel(cache, "bogus")
-          assert out.status == "cancelled", out
+          assert jobs.cancel(cache, "bogus").status == "cancelled"
 
           fake2 = jobs.Job(
               job_id="dead", tool_name="transcribe_video", args={},
@@ -144,8 +144,7 @@ jobs:
           )
           jobs.write(cache, fake2)
           touched = jobs.recover_interrupted(cache)
-          ids = {t.job_id for t in touched}
-          assert "dead" in ids, ids
+          assert "dead" in {t.job_id for t in touched}
 
           assert jobs.read(cache, "no-such-id") is None
           print("OK")
