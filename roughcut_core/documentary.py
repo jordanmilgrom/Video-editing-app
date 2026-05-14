@@ -42,7 +42,12 @@ def read_transcript(
     end_segment: int | None = None,
     max_chars: int = DEFAULT_READ_CAP_CHARS,
 ) -> dict:
-    """Page through a saved transcript JSON."""
+    """Page through a saved transcript JSON.
+
+    Returns a dict the MCP layer can wrap straight into a ToolResponse
+    summary. `has_more` / `next_start` let the agent loop until the
+    full transcript has been read.
+    """
     t = Transcript.model_validate_json(Path(transcript_path).read_text(encoding="utf-8"))
     total = len(t.segments)
     start = max(0, int(start_segment))
@@ -53,6 +58,8 @@ def read_transcript(
     idx = start
     while idx < stop_at:
         seg = t.segments[idx]
+        # Rough size budget: char count of text + a small per-segment overhead
+        # for the timecode fields. 60 chars/segment for the JSON envelope.
         seg_chars = len(seg.text) + 60
         if out and chars + seg_chars > max_chars:
             break
@@ -87,7 +94,13 @@ def search_transcripts(
     max_results: int = 20,
     context_segments: int = 2,
 ) -> dict:
-    """Case-insensitive substring search across every cached transcript."""
+    """Case-insensitive substring search across every cached transcript.
+
+    If `folder_path` is provided, only hits whose `Transcript.source_path`
+    lives inside that folder are returned. Each hit includes a few
+    segments of context on either side so the agent can read the moment
+    without paging.
+    """
     needle = (query or "").lower()
     transcripts_root = Path(cache_dir) / "transcripts"
     hits: list[dict] = []
@@ -118,7 +131,11 @@ def search_transcripts(
 
 
 def summarize_clip(transcript_path: Path) -> dict:
-    """Deterministic per-clip snippet view — no LLM call."""
+    """Deterministic per-clip snippet view — no LLM call.
+
+    Lets the agent scan 32 clips' "shape" in a few hundred KB of total
+    tool output before deciding which one to `read_transcript` in full.
+    """
     t = Transcript.model_validate_json(Path(transcript_path).read_text(encoding="utf-8"))
     text_full = " ".join(s.text.strip() for s in t.segments).strip()
     longest_seg_idx = 0
@@ -144,7 +161,13 @@ def summarize_clip(transcript_path: Path) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
 def _hit(path: Path, t: Transcript, seg_idx: int, context: int) -> dict:
+    """One search hit + a small window of surrounding segments."""
     before = []
     for i in range(max(0, seg_idx - context), seg_idx):
         s = t.segments[i]

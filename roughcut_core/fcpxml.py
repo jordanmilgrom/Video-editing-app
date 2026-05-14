@@ -1,10 +1,16 @@
 """FCPXML v1.10 emission.
 
-v0.6.4 fix: the asset element used `<asset src="..."/>`, which Final
-Cut Pro rejects under the 1.10 DTD with "No declaration for attribute
-src of element asset". The correct shape is `<asset>...<media-rep
-kind="original-media" src="..."/></asset>`. Both the standard and the
-multicam emitters now produce DTD-compliant documents.
+Structure:
+
+```
+fcpxml
+  resources
+    format
+    asset...        # one per unique source file, absolute file:// URI
+  library/event/project/sequence/spine
+    asset-clip      # A-roll on lane 0 (V1)
+      asset-clip lane=1  # b-roll on V2, nested inside its A-roll parent
+```
 
 Times are rational fractions snapped to the sequence frame rate so
 Premiere and Resolve relink cleanly. Asset durations are derived from
@@ -82,6 +88,7 @@ def write_fcpxml(spec: SequenceSpec, output_path: Path) -> None:
 
 def _attach_broll(parent: ET.Element, spec: SequenceSpec, asset_ids: dict[Path, str],
                   base_offset: float, parent_dur: float, fps_num: int, fps_den: int) -> None:
+    """Nest b-roll asset-clips on lane 1 of the A-roll clip they fall inside."""
     for ins in spec.broll:
         if not (base_offset <= ins.aroll_offset_sec < base_offset + parent_dur):
             continue
@@ -104,14 +111,17 @@ def _attach_broll(parent: ET.Element, spec: SequenceSpec, asset_ids: dict[Path, 
 
 def _emit_assets(resources: ET.Element, spec: SequenceSpec,
                  fps_num: int, fps_den: int) -> dict[Path, str]:
+    """Register one <asset> per unique source path. Returns {path: asset_id}."""
     paths: list[Path] = []
     seen: set[Path] = set()
     for seg in spec.aroll:
         if seg.source_path not in seen:
-            seen.add(seg.source_path); paths.append(seg.source_path)
+            seen.add(seg.source_path)
+            paths.append(seg.source_path)
     for ins in spec.broll:
         if ins.source_path not in seen:
-            seen.add(ins.source_path); paths.append(ins.source_path)
+            seen.add(ins.source_path)
+            paths.append(ins.source_path)
 
     asset_ids: dict[Path, str] = {}
     for i, path in enumerate(paths, start=1):
@@ -133,7 +143,7 @@ def _emit_assets(resources: ET.Element, spec: SequenceSpec,
         })
         # DTD 1.10 requires `<media-rep>` as a child; `src` on the asset
         # element itself was deprecated long ago and the validator rejects
-        # the document outright.
+        # the document outright (no declaration for attribute src of asset).
         ET.SubElement(asset, "media-rep", {
             "kind": "original-media",
             "src": Path(path).resolve().as_uri(),
@@ -142,6 +152,7 @@ def _emit_assets(resources: ET.Element, spec: SequenceSpec,
 
 
 def _asset_duration(path: Path, spec: SequenceSpec) -> float:
+    """Pick the largest out-point referenced for this source (a-roll or b-roll)."""
     candidates = [seg.out_sec for seg in spec.aroll if seg.source_path == path]
     candidates += [ins.clip_out_sec for ins in spec.broll if ins.source_path == path]
     return max(candidates, default=60.0)
@@ -167,6 +178,7 @@ def _format_name(fps: float, height: int) -> str:
 
 
 def _t(seconds: float, fps_num: int, fps_den: int) -> str:
+    """Snap seconds to a frame boundary; return rational like '1001/24000s'."""
     if seconds <= 0:
         return "0s"
     frames = round(seconds * fps_num / fps_den)
@@ -195,6 +207,13 @@ def write_multicam_fcpxml(
     width: int = 1920,
     height: int = 1080,
 ) -> None:
+    """Emit a flat V1 sequence with one asset-clip per angle decision.
+
+    This is intentionally NOT a true `<mc-clip>` multicam element — the
+    agent has already picked angles, so we lay them out as straight cuts
+    Premiere/Resolve can scrub. Editors who want to re-pick angles in
+    the NLE can re-link sources after import.
+    """
     if not selections:
         raise ValueError("write_multicam_fcpxml: selections is empty")
     fps_num, fps_den = _fps_rational(fps)
@@ -212,7 +231,8 @@ def write_multicam_fcpxml(
     seen: set[Path] = set()
     for s in selections:
         if s.clip_path not in seen:
-            seen.add(s.clip_path); paths.append(s.clip_path)
+            seen.add(s.clip_path)
+            paths.append(s.clip_path)
     asset_ids: dict[Path, str] = {}
     for i, p in enumerate(paths, start=1):
         aid = f"r{i}"

@@ -1,11 +1,11 @@
 """CMX 3600 EDL emitter — V1-only universal fallback.
 
-When FCPXML and FCP 7 XML both fail, an EDL still loads in every
-editor on Earth. Trade-off: EDL doesn't model layers, so only V1
-(A-roll) is emitted; B-roll inserts get noted in trailing comments so
-the editor can recreate them by hand.
+When FCPXML and FCP 7 XML both fail (a finicky NLE, a corrupted
+import), an EDL still loads in every editor on Earth. Trade-off: EDL
+doesn't model layers, so only V1 (A-roll) is emitted; B-roll inserts
+get noted in trailing comments so the editor can recreate them by hand.
 
-Format (CMX 3600, non-drop frame):
+Format (CMX 3600 spec, non-drop frame):
 
     TITLE: <name>
     FCM: NON-DROP FRAME
@@ -14,9 +14,10 @@ Format (CMX 3600, non-drop frame):
     * FROM CLIP NAME: <basename>
     * SOURCE FILE: <abs path>
 
-Timecode is HH:MM:SS:FF at the sequence's integer timebase (24, 25,
-30...). Record TC starts at 01:00:00:00 — the standard one-hour pre-roll
-convention.
+Timecode is HH:MM:SS:FF at the sequence frame rate. Source TCs start at
+00:00:00:00 (we don't have real source TC, so we use file-relative).
+Record TC starts at 01:00:00:00 — the standard one-hour-pre-roll
+convention that prevents wrap-around at the head.
 """
 
 from __future__ import annotations
@@ -54,6 +55,8 @@ def write_edl(spec: SequenceSpec, output_path: Path) -> None:
         rec_cursor_sec += dur
 
     if spec.broll:
+        # EDL can't represent V2 cleanly; emit a footer comment so the
+        # editor knows what's missing instead of silently dropping it.
         lines.append("* B-ROLL INSERTS (not represented on V1 — recreate by hand):")
         for ins in spec.broll:
             tc = _seconds_to_tc(
@@ -70,12 +73,20 @@ def write_edl(spec: SequenceSpec, output_path: Path) -> None:
     output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _seconds_to_tc(seconds: float, fps: float) -> str:
-    """Whole-frame HH:MM:SS:FF at the integer timebase (NDF convention).
+# ---------------------------------------------------------------------------
+# Timecode helpers
+# ---------------------------------------------------------------------------
 
-    Using the integer timebase (24/25/30) as the divisor means 1 hour
-    of timebase-time = exactly 01:00:00:00 even at 23.976, which is the
-    CMX 3600 non-drop-frame standard.
+
+def _seconds_to_tc(seconds: float, fps: float) -> str:
+    """Whole-frame HH:MM:SS:FF at `fps` (NDF). Negative inputs clamp to 0.
+
+    We use the integer timebase (24, 25, 30...) as the frame divisor,
+    not the actual `fps` float. That's the CMX 3600 non-drop-frame
+    convention: timecode ticks at the timebase while playback runs at
+    the slightly-slower real fps (the discrepancy is what DF mode
+    compensates for; we don't emit DF). The upshot is that 1 hour of
+    timebase-time = exactly 01:00:00:00 even at 23.976.
     """
     if seconds <= 0:
         return "00:00:00:00"
@@ -90,6 +101,7 @@ def _seconds_to_tc(seconds: float, fps: float) -> str:
 
 
 def _tuple_to_seconds(hhmmssff: tuple[int, int, int, int], fps: float) -> float:
+    """Convert (H, M, S, F) to seconds at the timebase. Mirror of `_seconds_to_tc`."""
     h, m, s, f = hhmmssff
     fps_int = int(round(fps))
     return h * 3600 + m * 60 + s + f / fps_int

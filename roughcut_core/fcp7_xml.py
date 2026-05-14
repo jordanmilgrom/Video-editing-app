@@ -5,6 +5,19 @@ schema from Final Cut Pro 7 was the industry interchange format for a
 decade, so Adobe wrote excellent (and stable) support for it. roughcut
 emits a `.xml` next to the `.fcpxml` so editors who hit FCPXML problems
 have a second path that works.
+
+Layout:
+
+    <xmeml version="5">
+      <sequence>
+        rate / timecode / media
+          <video>
+            <track>...A-roll clipitems...</track>
+            <track>...B-roll clipitems on V2...</track>
+          </video>
+
+Times are in WHOLE FRAMES at the sequence rate. ntsc="TRUE" for the
+.976 / 29.97 / 59.94 timebases.
 """
 
 from __future__ import annotations
@@ -14,6 +27,7 @@ from pathlib import Path
 
 from roughcut_core.models import SequenceSpec
 
+# (timebase, ntsc) for each fps we care about.
 _RATE_TABLE: dict[float, tuple[int, str]] = {
     23.976: (24, "TRUE"),
     24.0: (24, "FALSE"),
@@ -44,6 +58,8 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
     video = ET.SubElement(media, "video")
     _format_block(video, spec)
 
+    # File pool: one <file> per unique source path. Lookup table keyed on
+    # path string so V2 inserts reference the same file id as V1.
     paths: list[Path] = []
     seen: set[Path] = set()
     for s in spec.aroll:
@@ -54,6 +70,8 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
             seen.add(ins.source_path); paths.append(ins.source_path)
     file_ids = {p: f"file-{i}" for i, p in enumerate(paths, start=1)}
 
+    # V1: A-roll spine. Files declared inline on the first reference;
+    # subsequent references use <file id="..."/> empty form per the schema.
     v1 = ET.SubElement(video, "track")
     declared: set[Path] = set()
     cursor = 0
@@ -68,6 +86,7 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
         )
         cursor += dur_f
 
+    # V2: B-roll inserts addressed by their A-roll-relative offset.
     if spec.broll:
         v2 = ET.SubElement(video, "track")
         for clip_idx, ins in enumerate(spec.broll, start=1):
@@ -84,6 +103,11 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
             )
 
     _write_xml(xmeml, output_path)
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
 
 
 def _rate(fps: float) -> tuple[int, str]:
@@ -136,6 +160,7 @@ def _clipitem(
     ET.SubElement(item, "out").text = str(out)
     file_id = file_ids[source_path]
     if source_path in declared:
+        # Reference-only form for subsequent uses of the same source.
         ET.SubElement(item, "file", {"id": file_id})
     else:
         declared.add(source_path)
@@ -143,6 +168,8 @@ def _clipitem(
         ET.SubElement(file_el, "name").text = Path(source_path).name
         ET.SubElement(file_el, "pathurl").text = Path(source_path).resolve().as_uri()
         _rate_block(file_el, timebase, ntsc)
+        # Whole-file duration unknown without ffprobe; use the
+        # max-referenced out as a lower bound. Premiere relinks happily.
         ET.SubElement(file_el, "duration").text = str(out)
 
 
