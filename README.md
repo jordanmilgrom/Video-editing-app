@@ -77,27 +77,51 @@ V2. Clips relink to source by absolute path.
 
 ---
 
-## The twelve tools
+## The seventeen tools
 
-| Tool                         | Mode      | What it does                                                                  |
-| ---------------------------- | --------- | ----------------------------------------------------------------------------- |
-| `get_project_paths`          | meta      | Return the interview / b-roll / script paths set at install time + cache dir. |
-| `list_clips`                 | shared    | Inventory a folder of video files (ffprobe).                                  |
-| `transcribe_video`           | shared    | Local mlx-whisper transcription with word timestamps.                         |
-| `cluster_takes_by_silence`   | doc       | Group transcript segments by silence boundaries.                              |
-| `align_takes_to_script`      | doc       | Fuzzy-match transcript segments against script lines.                         |
-| `extract_frame_grid`         | doc       | Sample 16 frames from a clip, tile into a JPEG contact sheet.                 |
-| `get_clip_thumbnail`         | doc       | One frame at a specific timecode.                                             |
-| `generate_fcpxml`            | doc       | Write FCPXML v1.10 from a `SequenceSpec` the agent built.                     |
-| `detect_multicam_groups`     | multicam  | Group simultaneously-recorded clips by audio waveform sync.                   |
-| `diarize_speakers`           | multicam  | Per-segment speaker labels via mic-RMS dominance (no pyannote).               |
-| `pick_angle_per_segment`     | multicam  | Pick camera per segment + sprinkle reaction shots.                            |
-| `generate_multicam_fcpxml`   | multicam  | Write FCPXML laying out angles as flat cuts on V1.                            |
+| Tool                         | Sync / Async | Mode      | What it does                                                                  |
+| ---------------------------- | ------------ | --------- | ----------------------------------------------------------------------------- |
+| `get_project_paths`          | sync         | meta      | Return the interview / b-roll / script paths set at install time + cache dir. |
+| `get_system_status`          | sync         | meta      | Preflight: python, ffmpeg, libmlx, whisper model cache, disk space.           |
+| `list_clips`                 | sync         | shared    | Inventory a folder of video files (ffprobe).                                  |
+| `transcribe_video`           | **async**    | shared    | mlx-whisper transcription; spawns a job, returns `job_id`.                    |
+| `cluster_takes_by_silence`   | **async**    | doc       | Group transcript segments by silence (job).                                   |
+| `align_takes_to_script`      | **async**    | doc       | Fuzzy-match segments to script lines (job).                                   |
+| `extract_frame_grid`         | sync         | doc       | 16 frames → JPEG contact sheet, returned inline.                              |
+| `get_clip_thumbnail`         | sync         | doc       | One frame at a specific timecode.                                             |
+| `generate_fcpxml`            | sync         | doc       | Write FCPXML v1.10 from a `SequenceSpec`.                                     |
+| `detect_multicam_groups`     | **async**    | multicam  | Audio-sync clips into groups (job).                                           |
+| `diarize_speakers`           | **async**    | multicam  | Per-segment speaker via mic-RMS dominance (job).                              |
+| `pick_angle_per_segment`     | **async**    | multicam  | Pick camera per segment + reaction shots (job).                               |
+| `generate_multicam_fcpxml`   | sync         | multicam  | Flat-cut FCPXML from an AngleSelection list.                                  |
+| `check_job_status`           | sync         | jobs      | Poll a job by `job_id`.                                                       |
+| `list_jobs`                  | sync         | jobs      | Recent jobs — recover context after a chat restart.                           |
+| `cancel_job`                 | sync         | jobs      | SIGTERM → SIGKILL a running job.                                              |
+| `resume_job`                 | sync         | jobs      | Re-run a failed / interrupted / cancelled job.                                |
 
-**Size-bounded returns (v0.5.0):** every tool whose payload could exceed
-Claude Desktop's 1 MB tool-result cap writes its full output to a JSON
-file under `~/Video-editing-app/cache/` and returns a small summary
-with a `*_path` field. The agent passes those paths to downstream tools.
+### Resilience model (v0.6.0)
+
+Real transcriptions exceed Claude Desktop's tool-call timeout. The six
+**async** tools spawn a detached worker subprocess and return
+immediately with a `job_id`. The agent polls `check_job_status(job_id)`
+until status is `succeeded`, then reads `result_summary` (and
+`result_path` for the persisted full output).
+
+Jobs survive:
+- Tool-call timeouts (the work runs out-of-process).
+- Claude Desktop quit/restart (worker stays detached; on next launch,
+  the server scans the jobs dir and marks dead jobs `interrupted` so
+  the agent can `resume_job` them).
+- Fresh chat sessions (`list_jobs` shows recent activity; the agent
+  picks up any succeeded job's `result_path` instead of redoing work).
+
+Identical inputs hit the same `job_id` (sha256 over tool name + path +
+size + mtime + model), so re-running transcribe on the same file is a
+free cache hit — no work.
+
+**Size-bounded returns:** every async tool's result is a JSON file on
+disk under `~/Video-editing-app/cache/`. Tool results to the agent are
+always small (a path + a few counts).
 
 The agent decides which to call and when. The
 [`docs/example-workflow.md`](docs/example-workflow.md) prompt
@@ -105,14 +129,17 @@ orchestrates them end-to-end.
 
 ---
 
-## What's NOT in v0.5
+## What's NOT in v0.6
 
 Music, color, audio mixing, RAW formats (`.braw` / `.r3d` / `.ari` —
 transcode to ProRes/H.264 first), pyannote-style diarization for
 single-mic podcasts (we rely on per-host lavs and mic-dominance — fine
-for typical setups, wrong for podcasts mixed to a single track). It's
-an opinionated first draft. Expect to recut everything — that's the
-point.
+for typical setups, wrong for podcasts mixed to a single track),
+checkpoint-level resume inside an in-progress transcription (`resume_job`
+restarts the whole transcription; the extracted audio + downloaded
+model survive across runs, so it's still much faster than the first
+attempt). It's an opinionated first draft. Expect to recut everything
+— that's the point.
 
 ---
 
