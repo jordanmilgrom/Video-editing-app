@@ -28,21 +28,22 @@ def tiny_video(tmp_path: Path) -> Path:
 
 
 def test_extract_frame_grid_rejects_relative_path() -> None:
-    res = tools._extract_frame_grid("relative.mp4", 16, True, None)
+    res = tools._extract_frame_grid("relative.mp4", 16, True)
     assert isinstance(res, ToolResponse)
     assert res.ok is False
     assert res.error == "relative_path"
 
 
 @requires_ffmpeg
-def test_extract_frame_grid_returns_image_and_sidecar(tmp_path: Path, tiny_video: Path) -> None:
-    result = tools._extract_frame_grid(str(tiny_video), 16, True, str(tmp_path / "cache"))
+def test_extract_frame_grid_returns_image_and_sidecar(
+    tmp_path: Path, tiny_video: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGHCUT_CACHE_DIR", str(tmp_path / "cache"))
+    result = tools._extract_frame_grid(str(tiny_video), 16, True)
     assert isinstance(result, list) and len(result) == 2
-
     image, sidecar = result
     assert isinstance(image, Image)
     assert isinstance(sidecar, TextContent)
-
     payload = json.loads(sidecar.text)
     assert "image_path" in payload and "duration_sec" in payload
     assert payload["num_frames"] == 16
@@ -51,6 +52,7 @@ def test_extract_frame_grid_returns_image_and_sidecar(tmp_path: Path, tiny_video
 
 @requires_ffmpeg
 def test_extract_frame_grid_caches(tmp_path: Path, tiny_video: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ROUGHCUT_CACHE_DIR", str(tmp_path / "cache"))
     calls = {"n": 0}
     real_build = tools.broll.build_contact_sheet
 
@@ -59,10 +61,8 @@ def test_extract_frame_grid_caches(tmp_path: Path, tiny_video: Path, monkeypatch
         return real_build(*args, **kwargs)
 
     monkeypatch.setattr(tools.broll, "build_contact_sheet", counted)
-
-    cache = str(tmp_path / "cache")
-    tools._extract_frame_grid(str(tiny_video), 16, True, cache)
-    tools._extract_frame_grid(str(tiny_video), 16, True, cache)  # second call should hit cache
+    tools._extract_frame_grid(str(tiny_video), 16, True)
+    tools._extract_frame_grid(str(tiny_video), 16, True)  # second call should hit cache
     assert calls["n"] == 1
 
 

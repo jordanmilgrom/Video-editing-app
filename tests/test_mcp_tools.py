@@ -103,15 +103,58 @@ def test_build_server_registers_expected_tools() -> None:
     import asyncio
     tool_objs = asyncio.run(server.list_tools())
     names = {t.name for t in tool_objs}
-    # Doc-mode tools
+    # Doc-mode tools (sync + async)
     assert {"list_clips", "transcribe_video", "cluster_takes_by_silence",
             "align_takes_to_script", "generate_fcpxml",
             "extract_frame_grid", "get_clip_thumbnail"}.issubset(names)
     # Multicam tools
     assert {"detect_multicam_groups", "diarize_speakers",
             "pick_angle_per_segment", "generate_multicam_fcpxml"}.issubset(names)
+    # Job management (new in v0.6.0)
+    assert {"check_job_status", "list_jobs", "cancel_job", "resume_job"}.issubset(names)
     # Meta
-    assert "get_project_paths" in names
+    assert {"get_project_paths", "get_system_status"}.issubset(names)
+
+
+def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:
+    res = tools._get_system_status()
+    assert res.summary is not None
+    details = res.summary["details"]
+    # ffmpeg/ffprobe live on the test host's PATH thanks to the conftest fixture.
+    assert "ffmpeg" in details
+    assert "python" in details
+    assert details["python"]["ok"] is True
+
+
+def test_check_job_status_returns_not_a_file_for_unknown_id(isolated_cache: Path) -> None:
+    res = tools._check_job_status("does-not-exist")
+    assert res.ok is False
+    assert res.error == "not_a_file"
+    assert "hint" in (res.summary or {})
+
+
+def test_list_jobs_returns_empty_when_cache_is_fresh(isolated_cache: Path) -> None:
+    res = tools._list_jobs(None, 20)
+    assert res.ok is True
+    assert (res.summary or {})["job_count"] == 0
+
+
+def test_resume_job_returns_succeeded_immediately_when_cached(
+    isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from roughcut_core import jobs as core_jobs
+    import time
+    now = time.time()
+    j = core_jobs.Job(
+        job_id="cached-ok", tool_name="_test_noop", args={},
+        status="succeeded", started_at=now, updated_at=now,
+        result_path="/tmp/x.json", result_summary={"echo": "ok"},
+    )
+    core_jobs.write(isolated_cache, j)
+    res = tools._resume_job("cached-ok")
+    assert res.ok is True
+    assert res.summary["status"] == "succeeded"
+    assert res.summary["result_path"] == "/tmp/x.json"
 
 
 def test_get_project_paths_includes_cache_dir(
