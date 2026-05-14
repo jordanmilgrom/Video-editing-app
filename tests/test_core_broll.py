@@ -43,12 +43,20 @@ def test_frame_timestamps_short_clip_stays_in_bounds() -> None:
 
 @requires_ffmpeg
 def test_build_contact_sheet_dimensions(tmp_path: Path, tiny_video: Path) -> None:
+    """v0.6.5: dimensions derive from `tile_size` (default 256) and a
+    square-ish grid sized to fit `num_frames`. For the default 16-frame
+    sheet that's a 4×4 grid of 256×144 cells = 1024×576 px."""
+    import math
     out = tmp_path / "sheet.jpg"
     timestamps = broll.build_contact_sheet(tiny_video, out, duration=2.0)
     assert out.exists()
     assert len(timestamps) == broll.NUM_FRAMES
+    cols = int(math.ceil(math.sqrt(broll.NUM_FRAMES)))
+    rows = int(math.ceil(broll.NUM_FRAMES / cols))
+    cell_w = broll.DEFAULT_TILE_SIZE
+    cell_h = cell_w * 9 // 16
     with Image.open(out) as img:
-        assert img.size == (broll.CELL_W * broll.GRID_COLS, broll.CELL_H * broll.GRID_ROWS)
+        assert img.size == (cell_w * cols, cell_h * rows)
         assert img.format == "JPEG"
     # Sheet must stay under 1 MB so MCP can inline-return it under Desktop's cap.
     assert out.stat().st_size < 1_000_000

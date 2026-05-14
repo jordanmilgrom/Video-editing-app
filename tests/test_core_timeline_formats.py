@@ -150,3 +150,46 @@ def test_edl_notes_broll_in_footer(tmp_path: Path) -> None:
     body = out.read_text()
     assert "B-ROLL INSERTS" in body
     assert "broll.mp4" in body
+
+
+# ----- v0.6.5 P0 #2: special chars in paths must round-trip ----------------
+
+
+def _spec_with_spaces(tmp_path: Path) -> SequenceSpec:
+    """Realistic editorial path: spaces, `#`, parens, brackets — all show up
+    in real folders like 'Shoot Day 2 (Tuesday)/clip [hero #1].mov'."""
+    folder = tmp_path / "Shoot Day 2 (Tuesday)"
+    folder.mkdir()
+    src = folder / "clip [hero #1].mov"
+    src.touch()
+    return SequenceSpec(
+        name="path-encoding-test", fps=23.976,
+        aroll=[ARollSegment(source_path=src, in_sec=0.0, out_sec=2.0)],
+    )
+
+
+def test_fcpxml_pathurl_encodes_special_chars(tmp_path: Path) -> None:
+    out = tmp_path / "cut.fcpxml"
+    fcpxml.write_fcpxml(_spec_with_spaces(tmp_path), out)
+    root = ET.fromstring(out.read_text())
+    rep = root.find(".//asset/media-rep")
+    assert rep is not None
+    src = rep.attrib["src"]
+    # Spaces and `#`/`[`/`]` must be percent-encoded; raw chars break
+    # FCP's URL parser silently. v0.6.5 P0 #2.
+    assert " " not in src, src
+    assert "#" not in src, src
+    assert "[" not in src and "]" not in src, src
+    assert "%20" in src and "%23" in src
+
+
+def test_fcp7_pathurl_encodes_special_chars(tmp_path: Path) -> None:
+    out = tmp_path / "cut.xml"
+    fcp7_xml.write_fcp7_xml(_spec_with_spaces(tmp_path), out)
+    root = ET.fromstring(out.read_text())
+    pathurl = root.find(".//pathurl")
+    assert pathurl is not None and pathurl.text is not None
+    text = pathurl.text
+    assert " " not in text, text
+    assert "#" not in text, text
+    assert "%20" in text and "%23" in text
