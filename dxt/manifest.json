@@ -2,8 +2,8 @@
   "dxt_version": "0.1",
   "name": "roughcut",
   "display_name": "roughcut — AI rough-cut assistant",
-  "version": "0.5.1",
-  "description": "First-draft video editor driven by your Claude agent. Two modes: doc/interview and multicam podcast. Bundles ffmpeg + Python 3.11 + all deps; no Terminal required.",
+  "version": "0.6.0",
+  "description": "First-draft video editor driven by your Claude agent. Doc/interview and multicam podcast modes. Long-running work runs as background jobs that survive Claude Desktop restarts.",
   "long_description": "Point roughcut at a folder of interview footage and a folder of b-roll. The agent picks the cleanest takes, decides where b-roll fits, and writes a Premiere / DaVinci Resolve project file. roughcut does the deterministic work (transcribe, cluster takes, contact-sheet frames, build FCPXML); your Claude subscription pays for the reasoning. macOS Apple Silicon only.",
   "author": {
     "name": "roughcut"
@@ -30,18 +30,23 @@
     }
   },
   "tools": [
-    {"name": "list_clips", "description": "Inventory video files in a folder via ffprobe."},
-    {"name": "transcribe_video", "description": "Local mlx-whisper transcription with word timestamps."},
-    {"name": "cluster_takes_by_silence", "description": "Group transcript segments by silence boundaries."},
-    {"name": "align_takes_to_script", "description": "Fuzzy-match transcript segments against script lines."},
-    {"name": "extract_frame_grid", "description": "Sample frames from a clip into a contact sheet."},
-    {"name": "get_clip_thumbnail", "description": "Extract one frame at a specific timecode."},
-    {"name": "generate_fcpxml", "description": "Write FCPXML v1.10 to disk from a SequenceSpec."},
-    {"name": "detect_multicam_groups", "description": "Group simultaneously-recorded clips by audio sync."},
-    {"name": "diarize_speakers", "description": "Per-segment speaker labels via mic RMS dominance."},
-    {"name": "pick_angle_per_segment", "description": "Pick camera angle per segment with reaction shots."},
-    {"name": "generate_multicam_fcpxml", "description": "Write FCPXML from an AngleSelection list."},
-    {"name": "get_project_paths", "description": "Return the user-configured interview, b-roll, and script paths."}
+    {"name": "list_clips", "description": "Inventory video files in a folder via ffprobe (sync)."},
+    {"name": "transcribe_video", "description": "Spawn an mlx-whisper transcription job; returns job_id."},
+    {"name": "cluster_takes_by_silence", "description": "Spawn a silence-clustering job; returns job_id."},
+    {"name": "align_takes_to_script", "description": "Spawn a script-alignment job; returns job_id."},
+    {"name": "extract_frame_grid", "description": "Sample frames from a clip into a contact sheet (sync)."},
+    {"name": "get_clip_thumbnail", "description": "Extract one frame at a specific timecode (sync)."},
+    {"name": "generate_fcpxml", "description": "Write FCPXML v1.10 to disk from a SequenceSpec (sync)."},
+    {"name": "detect_multicam_groups", "description": "Spawn an audio-sync grouping job; returns job_id."},
+    {"name": "diarize_speakers", "description": "Spawn a mic-RMS diarization job; returns job_id."},
+    {"name": "pick_angle_per_segment", "description": "Spawn an angle-picking job; returns job_id."},
+    {"name": "generate_multicam_fcpxml", "description": "Write FCPXML from an AngleSelection list (sync)."},
+    {"name": "check_job_status", "description": "Poll an async job by job_id."},
+    {"name": "list_jobs", "description": "List recent jobs (use to recover after a Claude Desktop restart)."},
+    {"name": "cancel_job", "description": "Stop a running job (SIGTERM then SIGKILL)."},
+    {"name": "resume_job", "description": "Re-run a failed / interrupted / cancelled job."},
+    {"name": "get_project_paths", "description": "Return the user-configured interview, b-roll, and script paths."},
+    {"name": "get_system_status", "description": "Preflight diagnostics (python, ffmpeg, libmlx, cache, disk)."}
   ],
   "user_config": {
     "interview_folder": {
