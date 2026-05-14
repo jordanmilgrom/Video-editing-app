@@ -103,24 +103,22 @@ def test_build_server_registers_expected_tools() -> None:
     import asyncio
     tool_objs = asyncio.run(server.list_tools())
     names = {t.name for t in tool_objs}
-    # Doc-mode tools (sync + async)
     assert {"list_clips", "transcribe_video", "cluster_takes_by_silence",
             "align_takes_to_script", "generate_fcpxml",
             "extract_frame_grid", "get_clip_thumbnail"}.issubset(names)
-    # Multicam tools
     assert {"detect_multicam_groups", "diarize_speakers",
             "pick_angle_per_segment", "generate_multicam_fcpxml"}.issubset(names)
-    # Job management (new in v0.6.0)
     assert {"check_job_status", "list_jobs", "cancel_job", "resume_job"}.issubset(names)
-    # Meta
     assert {"get_project_paths", "get_system_status"}.issubset(names)
+    # Documentary mode (new in v0.6.3)
+    assert {"read_transcript", "search_transcripts", "summarize_clip"}.issubset(names)
+    assert "prewarm_model" in names
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:
     res = tools._get_system_status()
     assert res.summary is not None
     details = res.summary["details"]
-    # ffmpeg/ffprobe live on the test host's PATH thanks to the conftest fixture.
     assert "ffmpeg" in details
     assert "python" in details
     assert details["python"]["ok"] is True

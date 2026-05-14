@@ -42,36 +42,12 @@ inside the `.dxt`. First-run transcription works fully offline.
 
 ---
 
-## 60-second "try it"
-
-Once installed, ask Claude in a new chat:
-
-> *"Use `get_project_paths` to check what I configured, then run
-> `list_clips` on the interview folder."*
-
-You should get back codec, duration, frame rate, resolution, and size
-for each video file in that folder.
-
----
-
-## Build a full rough cut
-
-Open [`docs/example-workflow.md`](docs/example-workflow.md). Copy the
-prompt into a fresh Claude Desktop chat and let the agent run.
-
-Open the resulting `.fcpxml` in Premiere Pro
-(`File → Import → choose the file`) or DaVinci Resolve
-(`File → Import Timeline → File`). Interview audio sits on V1, b-roll on
-V2. Clips relink to source by absolute path.
-
----
-
-## The eighteen tools
+## The twenty-one tools
 
 | Tool                         | Sync / Async | Mode      | What it does                                                                  |
 | ---------------------------- | ------------ | --------- | ----------------------------------------------------------------------------- |
 | `get_project_paths`          | sync         | meta      | Return the interview / b-roll / script paths set at install time + cache dir. |
-| `get_system_status`          | sync         | meta      | Preflight + per-model cache inventory (which models are bundled vs to-fetch). |
+| `get_system_status`          | sync         | meta      | Preflight + per-model cache inventory + worker pool config + queue depth.     |
 | `list_clips`                 | sync         | shared    | Inventory a folder of video files (ffprobe).                                  |
 | `transcribe_video`           | **async**    | shared    | mlx-whisper transcription; default model `small` is bundled (offline ok).     |
 | `prewarm_model`              | **async**    | shared    | Pre-fetch a bigger whisper model (`medium`, `large-v3`, ...) in background.   |
@@ -88,6 +64,74 @@ V2. Clips relink to source by absolute path.
 | `list_jobs`                  | sync         | jobs      | Recent jobs — recover context after a chat restart.                           |
 | `cancel_job`                 | sync         | jobs      | SIGTERM → SIGKILL a running job.                                              |
 | `resume_job`                 | sync         | jobs      | Re-run a failed / interrupted / cancelled job.                                |
+| `read_transcript`            | sync         | docs      | Page through a saved transcript JSON in chunks (~900 KB cap per call).        |
+| `search_transcripts`         | sync         | docs      | Case-insensitive substring search across cached transcripts.                  |
+| `summarize_clip`             | sync         | docs      | Deterministic snippet view of one clip (no LLM call).                         |
+
+### Documentary workflow (v0.6.3)
+
+Documentary editing is "find the story in what was actually said,"
+which doesn't fit the scripted alignment flow. The three sync
+**docs** tools above let chat-side Claude scan a 32-clip shoot
+without you having to paste anything in.
+
+A typical session looks like:
+
+> *Drop the interview folder into chat. Then ask:*
+>
+> > *"Transcribe everything in that folder. When all jobs are done,*
+> > *call `summarize_clip` on each one and give me the headline of*
+> > *each interview."*
+>
+> *Claude fires 32 async `transcribe_video` jobs (the v0.6.3 worker*
+> *pool runs them serially without lockup), polls `list_jobs` until*
+> *all are succeeded, then calls `summarize_clip` per result_path.*
+> *You get a one-screen briefing.*
+>
+> > *"Search for moments about [topic]."*
+>
+> *`search_transcripts` returns hits across every clip with context.*
+>
+> > *"Read clip 7 in full."*
+>
+> *`read_transcript` pages the full transcript in 900 KB chunks.*
+>
+> > *"Build me a rough cut focused on the [theme] moments."*
+>
+> *Claude assembles a `SequenceSpec` from the hit timestamps and*
+> *calls `generate_fcpxml`. You open the result in Premiere.*
+
+### Concurrency model (v0.6.3)
+
+The async tools enqueue against a **single persistent worker
+subprocess** per cache dir. Pool size is configurable via
+`ROUGHCUT_WORKER_POOL_SIZE`; default `1`. mlx-whisper on Apple Silicon
+doesn't parallelize across whisper instances usefully, so the default
+keeps the GPU saturated by exactly one job at a time. The MCP server
+itself never blocks on subprocess startup — it writes the job record,
+appends to the queue, and returns. `check_job_status` / `list_jobs` /
+`cancel_job` only touch on-disk JSON, never IPC with the worker.
+
+`get_system_status.workers` shows the configured limit, live worker
+pids, and the current queue depth.
+
+### Resilience model (v0.6.0)
+
+Real transcriptions exceed Claude Desktop's tool-call timeout. The six
+**async** tools spawn a detached worker subprocess and return
+immediately with a `job_id`. The agent polls `check_job_status(job_id)`
+until status is `succeeded`, then reads `result_summary` (and
+`result_path` for the persisted full output).
+
+Jobs survive Claude Desktop quit/restart; `list_jobs` lets a fresh
+chat session pick up where the old one left off. Identical inputs hit
+the same `job_id` (sha256 over tool name + path + size + mtime +
+model), so re-running transcribe on the same file is a free cache hit
+— no work.
+
+**Size-bounded returns:** every async tool's result is a JSON file on
+disk under `~/Video-editing-app/cache/`. Tool results to the agent are
+always small (a path + a few counts).
 
 ### Whisper models (v0.6.1)
 
@@ -101,19 +145,13 @@ V2. Clips relink to source by absolute path.
 | `large-v3-turbo`  | `mlx-community/whisper-large-v3-turbo`       | ~1.6 GB   | Large-v3 quality at ~2x speed.           |
 
 Non-bundled models are auto-downloaded in-flight on first use
-(`check_job_status` shows `current_step` so you can tell whether you're
-waiting on the download or the transcription itself). Call
+(`check_job_status` shows `current_step`). Call
 `prewarm_model('large-v3')` ahead of time to pre-fetch in the
 background without blocking transcription.
 
-### Resilience model
-
-Real transcriptions exceed Claude Desktop's tool-call timeout. The
-async tools spawn a detached worker subprocess and return immediately
-with a `job_id`. The agent polls `check_job_status(job_id)` until
-status is `succeeded`. Jobs survive Claude Desktop quit/restart;
-`list_jobs` lets a fresh chat session pick up where the old one left
-off. Identical inputs hit the same `job_id` and return cached results.
+The agent decides which to call and when. The
+[`docs/example-workflow.md`](docs/example-workflow.md) prompt
+orchestrates them end-to-end.
 
 ---
 
@@ -121,8 +159,7 @@ off. Identical inputs hit the same `job_id` and return cached results.
 
 Music, color, audio mixing, RAW formats (`.braw` / `.r3d` / `.ari` —
 transcode to ProRes/H.264 first), pyannote-style diarization for
-single-mic podcasts (we rely on per-host lavs and mic-dominance — fine
-for typical setups, wrong for podcasts mixed to a single track),
+single-mic podcasts (we rely on per-host lavs and mic-dominance),
 checkpoint-level resume inside an in-progress transcription. It's an
 opinionated first draft. Expect to recut everything — that's the
 point.
