@@ -1,12 +1,10 @@
 """Job worker subprocess.
 
-Spawned by `roughcut_core.jobs.spawn()` as:
-    python -m roughcut_core.worker <job_id>
-
-Reads the persisted Job JSON, runs the tool, updates progress and the
-final result_path / error fields back to the same JSON. The MCP server
-never blocks; it just reads this file when the agent calls
-check_job_status.
+v0.6.3 redesign. Spawned by `roughcut_core.jobs._spawn_worker()` (no
+argv): the worker pops job_ids off the on-disk queue and runs them
+serially. Survives Claude Desktop quit (`start_new_session=True`).
+Exits after `IDLE_EXIT_SECONDS` of no work — the next `jobs.spawn()`
+call respawns it via `_ensure_workers`.
 
 Heavy imports (mlx-whisper, scipy) live inside the dispatch functions
 so the worker module itself stays importable on Linux for tests.
@@ -25,31 +23,77 @@ from typing import Any
 
 from roughcut_core import jobs
 
+# After this many seconds with no jobs queued, the worker shuts down.
+# Re-spawn is cheap; sitting idle wastes a python process slot.
+IDLE_EXIT_SECONDS = 120
+
+# Active job id while a handler is running. SIGTERM uses this to flip
+# the currently-executing job to "cancelled" before the worker exits.
+_current_job_id: str | None = None
+_current_cache_dir: Path | None = None
+
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]
-    if len(argv) != 1:
-        print("usage: python -m roughcut_core.worker <job_id>", file=sys.stderr)
-        return 2
-
-    job_id = argv[0]
+    global _current_cache_dir
     cache_dir = Path(os.environ.get("ROUGHCUT_CACHE_DIR") or (Path.home() / ".cache" / "roughcut"))
-    job = jobs.read(cache_dir, job_id)
-    if job is None:
-        print(f"worker: job {job_id} not found", file=sys.stderr)
-        return 1
-
-    # Make Ctrl-C / SIGTERM from cancel_job land cleanly in the JSON.
-    def _on_term(_sig: int, _frame: Any) -> None:
-        j = jobs.read(cache_dir, job_id)
-        if j and j.status in ("started", "running"):
-            j.status = "cancelled"
-            j.current_step = "cancelled by signal"
-            jobs.write(cache_dir, j)
-        sys.exit(130)
+    _current_cache_dir = cache_dir
+    slot = int(os.environ.get("ROUGHCUT_WORKER_SLOT", "0"))
+    pid_file = jobs._worker_pid_path(cache_dir, slot)
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     signal.signal(signal.SIGTERM, _on_term)
 
+    try:
+        _run_loop(cache_dir)
+    finally:
+        try:
+            if pid_file.read_text().strip() == str(os.getpid()):
+                pid_file.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
+    return 0
+
+
+def _run_loop(cache_dir: Path) -> None:
+    global _current_job_id
+    idle_since: float | None = None
+    while True:
+        job_id = jobs.pop_from_queue(cache_dir)
+        if job_id is None:
+            if idle_since is None:
+                idle_since = time.time()
+            elif time.time() - idle_since > IDLE_EXIT_SECONDS:
+                return
+            time.sleep(0.5)
+            continue
+        idle_since = None
+        _current_job_id = job_id
+        try:
+            _run_one(cache_dir, job_id)
+        finally:
+            _current_job_id = None
+
+
+def _on_term(_sig: int, _frame: Any) -> None:
+    """SIGTERM lands here. Flip the active job (if any) to cancelled, then exit."""
+    if _current_job_id and _current_cache_dir is not None:
+        j = jobs.read(_current_cache_dir, _current_job_id)
+        if j and j.status in ("queued", "started", "running"):
+            j.status = "cancelled"
+            j.current_step = "cancelled by signal"
+            jobs.write(_current_cache_dir, j)
+    sys.exit(130)
+
+
+def _run_one(cache_dir: Path, job_id: str) -> None:
+    job = jobs.read(cache_dir, job_id)
+    if job is None:
+        return
+    # Honor pre-pop cancellation: cancel() may have flipped the record
+    # to "cancelled" while this id was sitting in the queue.
+    if job.status == "cancelled":
+        return
     job.status = "running"
     job.pid = os.getpid()
     job.current_step = "starting"
@@ -67,10 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         job.error = f"{type(exc).__name__}: {exc}"
         job.traceback = tb.format_exc()
         job.hint = _hint_for(exc)
-    finally:
-        jobs.write(cache_dir, job)
-
-    return 0 if job.status == "succeeded" else 1
+    jobs.write(cache_dir, job)
 
 
 # ---------------------------------------------------------------------------

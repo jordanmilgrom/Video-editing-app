@@ -47,10 +47,12 @@ def test_compute_job_id_changes_when_file_mtime_changes(tmp_path: Path) -> None:
     assert a != b
 
 
-def test_spawn_creates_running_job(tmp_path: Path, monkeypatch) -> None:
-    # Cheap worker: just sleeps 0.3s then returns a dummy result.
+def test_spawn_enqueues_and_worker_runs_to_success(tmp_path: Path) -> None:
+    # v0.6.3: spawn returns immediately with status="queued". The worker
+    # subprocess picks it off the queue and flips it through running → succeeded.
     job = jobs.spawn(tmp_path, "_test_noop", {"path": str(tmp_path / "x.txt")})
-    assert job.job_id and job.pid
+    assert job.job_id
+    assert job.status in ("queued", "started")  # backward-compat alias still accepted
     finished = _wait_for(tmp_path, job.job_id, {"succeeded", "failed"})
     assert finished.status == "succeeded"
     assert finished.result_summary == {"echo": "ok"}
@@ -112,3 +114,100 @@ def test_failed_job_captures_traceback_and_hint(tmp_path: Path) -> None:
     final = _wait_for(tmp_path, j.job_id, {"failed"})
     assert final.error and "RuntimeError" in final.error
     assert final.traceback and "_do_test_boom" in final.traceback
+
+
+# ----- v0.6.3: queue + persistent-worker pool --------------------------------
+
+
+def test_pop_from_queue_is_fifo(tmp_path: Path) -> None:
+    jobs.jobs_dir(tmp_path)
+    jobs._append_to_queue(tmp_path, "a")
+    jobs._append_to_queue(tmp_path, "b")
+    jobs._append_to_queue(tmp_path, "c")
+    assert jobs.pop_from_queue(tmp_path) == "a"
+    assert jobs.pop_from_queue(tmp_path) == "b"
+    assert jobs.pop_from_queue(tmp_path) == "c"
+    assert jobs.pop_from_queue(tmp_path) is None
+
+
+def test_queue_depth_reflects_pending_work(tmp_path: Path) -> None:
+    jobs.jobs_dir(tmp_path)
+    assert jobs.queue_depth(tmp_path) == 0
+    jobs._append_to_queue(tmp_path, "a")
+    jobs._append_to_queue(tmp_path, "b")
+    assert jobs.queue_depth(tmp_path) == 2
+    jobs.pop_from_queue(tmp_path)
+    assert jobs.queue_depth(tmp_path) == 1
+
+
+def test_pool_size_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROUGHCUT_WORKER_POOL_SIZE", "3")
+    assert jobs.pool_size() == 3
+    monkeypatch.setenv("ROUGHCUT_WORKER_POOL_SIZE", "0")  # clamped to 1
+    assert jobs.pool_size() == 1
+    monkeypatch.setenv("ROUGHCUT_WORKER_POOL_SIZE", "garbage")
+    assert jobs.pool_size() == jobs.DEFAULT_POOL_SIZE
+
+
+def test_spawn_burst_returns_quickly(tmp_path: Path) -> None:
+    """Production blocker fix: 20 enqueues must NOT each Popen a subprocess.
+
+    v0.6.0..v0.6.2 spawned a subprocess per call → 31 parallel transcribe
+    requests deadlocked the MCP server. v0.6.3 enqueues + ensures a
+    single persistent worker. Each spawn() should land in milliseconds.
+    """
+    t0 = time.time()
+    ids = [jobs.spawn(tmp_path, "_test_noop", {"i": i}).job_id for i in range(20)]
+    elapsed = time.time() - t0
+    assert len(set(ids)) == 20
+    # Generous bound — on CI this should be well under 1s.
+    assert elapsed < 3.0, f"20 spawns took {elapsed:.2f}s (way too slow)"
+
+
+def test_list_jobs_returns_quickly_under_burst(tmp_path: Path) -> None:
+    """list_jobs must never IPC the worker — it reads JSON files only.
+
+    Fire 20 jobs into the queue, then immediately call list_jobs.
+    With the v0.6.0..v0.6.2 model, 20 simultaneous Popens could starve
+    the MCP server and make this read multi-second. v0.6.3 should
+    return in well under 1s regardless of queue depth.
+    """
+    for i in range(20):
+        jobs.spawn(tmp_path, "_test_noop", {"burst": i})
+    t0 = time.time()
+    listed = jobs.list_jobs(tmp_path)
+    elapsed = time.time() - t0
+    assert len(listed) >= 20
+    assert elapsed < 1.0, f"list_jobs(20 jobs) took {elapsed:.2f}s (target <1s)"
+
+
+def test_cancel_queued_job_skips_worker(tmp_path: Path) -> None:
+    """Cancelling a queued job must NOT touch the worker — just flips the
+    record. The worker skips when it pops a `cancelled` job_id."""
+    # Spawn one slow job to keep the worker busy, then queue another and cancel it.
+    busy = jobs.spawn(tmp_path, "_test_sleep", {"seconds": 5})
+    _wait_for(tmp_path, busy.job_id, {"running"})
+    queued = jobs.spawn(tmp_path, "_test_noop", {"will_be": "cancelled"})
+    after = jobs.cancel(tmp_path, queued.job_id)
+    assert after.status == "cancelled"
+    assert "queued" in (after.current_step or "") or after.current_step == "cancelled"
+    # Don't leave the slow job hanging.
+    jobs.cancel(tmp_path, busy.job_id)
+
+
+def test_ensure_workers_spawns_pid_file(tmp_path: Path) -> None:
+    """Helper sanity: _ensure_workers writes a worker-0.pid and the
+    process is reachable via os.kill(pid, 0)."""
+    jobs.jobs_dir(tmp_path)
+    pids = jobs._ensure_workers(tmp_path)
+    assert len(pids) == jobs.pool_size()
+    pid_file = jobs._worker_pid_path(tmp_path, 0)
+    assert pid_file.exists()
+    assert int(pid_file.read_text().strip()) in pids
+    # Clean up: ask the worker to exit so it doesn't leak across tests.
+    import os, signal
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass

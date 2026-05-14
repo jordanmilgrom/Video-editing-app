@@ -15,13 +15,14 @@ from pathlib import Path
 
 
 def collect(cache_dir: Path) -> dict:
-    from roughcut_core import models_catalog
+    from roughcut_core import jobs, models_catalog
     return {
         "python": _python_info(),
         "ffmpeg": _binary_check("ffmpeg", ["-version"]),
         "ffprobe": _binary_check("ffprobe", ["-version"]),
         "mlx_whisper_importable": _mlx_whisper_check(),
         "models": _models_block(models_catalog.inventory()),
+        "workers": _workers_block(cache_dir, jobs),
         "cache_dir": _cache_dir_check(cache_dir),
         "disk_free_gb": _disk_free_gb(cache_dir),
         "env": {
@@ -30,6 +31,33 @@ def collect(cache_dir: Path) -> dict:
             "ROUGHCUT_BROLL_DIR": os.environ.get("ROUGHCUT_BROLL_DIR"),
             "ROUGHCUT_SCRIPT_PATH": os.environ.get("ROUGHCUT_SCRIPT_PATH"),
         },
+    }
+
+
+def _workers_block(cache_dir: Path, jobs) -> dict:
+    """Surface the worker-pool config + the live queue depth.
+
+    Power users want to see `transcribe_concurrency_limit` to know how
+    parallel a 31-clip transcribe will run. The default of 1 is right
+    for mlx-whisper on Apple Silicon — bump via ROUGHCUT_WORKER_POOL_SIZE
+    only after benchmarking.
+    """
+    limit = jobs.pool_size()
+    live: list[int] = []
+    for slot in range(limit):
+        pid_file = jobs._worker_pid_path(cache_dir, slot)
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                if jobs._alive(pid):
+                    live.append(pid)
+            except (ValueError, OSError):
+                pass
+    return {
+        "ok": True,
+        "transcribe_concurrency_limit": limit,
+        "live_workers": live,
+        "queue_depth": jobs.queue_depth(cache_dir),
     }
 
 

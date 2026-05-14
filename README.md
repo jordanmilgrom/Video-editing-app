@@ -77,7 +77,7 @@ V2. Clips relink to source by absolute path.
 
 ---
 
-## The eighteen tools
+## The twenty-one tools
 
 | Tool                         | Sync / Async | Mode      | What it does                                                                  |
 | ---------------------------- | ------------ | --------- | ----------------------------------------------------------------------------- |
@@ -99,6 +99,56 @@ V2. Clips relink to source by absolute path.
 | `list_jobs`                  | sync         | jobs      | Recent jobs — recover context after a chat restart.                           |
 | `cancel_job`                 | sync         | jobs      | SIGTERM → SIGKILL a running job.                                              |
 | `resume_job`                 | sync         | jobs      | Re-run a failed / interrupted / cancelled job.                                |
+| `read_transcript`            | sync         | docs      | Page through a saved transcript JSON in chunks (~900 KB cap per call).        |
+| `search_transcripts`         | sync         | docs      | Case-insensitive substring search across cached transcripts.                  |
+| `summarize_clip`             | sync         | docs      | Deterministic snippet view of one clip (no LLM call).                         |
+
+### Documentary workflow (v0.6.3)
+
+Documentary editing is "find the story in what was actually said,"
+which doesn't fit the scripted alignment flow. The three sync
+**docs** tools above let chat-side Claude scan a 32-clip shoot
+without you having to paste anything in.
+
+A typical session looks like:
+
+> *Drop the interview folder into chat. Then ask:*
+>
+> > *"Transcribe everything in that folder. When all jobs are done,*
+> > *call `summarize_clip` on each one and give me the headline of*
+> > *each interview."*
+>
+> *Claude fires 32 async `transcribe_video` jobs (the v0.6.3 worker*
+> *pool runs them serially without lockup), polls `list_jobs` until*
+> *all are succeeded, then calls `summarize_clip` per result_path.*
+> *You get a one-screen briefing.*
+>
+> > *"Search for moments about [topic]."*
+>
+> *`search_transcripts` returns hits across every clip with context.*
+>
+> > *"Read clip 7 in full."*
+>
+> *`read_transcript` pages the full transcript in 900 KB chunks.*
+>
+> > *"Build me a rough cut focused on the [theme] moments."*
+>
+> *Claude assembles a `SequenceSpec` from the hit timestamps and*
+> *calls `generate_fcpxml`. You open the result in Premiere.*
+
+### Concurrency model (v0.6.3)
+
+The async tools enqueue against a **single persistent worker
+subprocess** per cache dir. Pool size is configurable via
+`ROUGHCUT_WORKER_POOL_SIZE`; default `1`. mlx-whisper on Apple Silicon
+doesn't parallelize across whisper instances usefully, so the default
+keeps the GPU saturated by exactly one job at a time. The MCP server
+itself never blocks on subprocess startup — it writes the job record,
+appends to the queue, and returns. `check_job_status` / `list_jobs` /
+`cancel_job` only touch on-disk JSON, never IPC with the worker.
+
+`get_system_status.workers` shows the configured limit, live worker
+pids, and the current queue depth.
 
 ### Resilience model (v0.6.0)
 

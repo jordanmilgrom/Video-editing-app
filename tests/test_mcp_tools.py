@@ -114,6 +114,10 @@ def test_build_server_registers_expected_tools() -> None:
     assert {"check_job_status", "list_jobs", "cancel_job", "resume_job"}.issubset(names)
     # Meta
     assert {"get_project_paths", "get_system_status"}.issubset(names)
+    # Documentary mode (new in v0.6.3)
+    assert {"read_transcript", "search_transcripts", "summarize_clip"}.issubset(names)
+    # Prewarm tool (v0.6.1)
+    assert "prewarm_model" in names
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:

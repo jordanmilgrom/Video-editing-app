@@ -184,6 +184,80 @@ jobs:
           print("OK")
           PY
 
+      - name: Concurrency burst — 20 jobs + list_jobs <1s (v0.6.3 lockup guard)
+        # v0.6.0..v0.6.2 spawned a subprocess per job → 31 parallel
+        # transcribe calls deadlocked the MCP server (Jordan's production
+        # crash). v0.6.3 enqueues against a single persistent worker.
+        # Fire 20 spawns in a tight loop, then immediately list_jobs —
+        # both must return fast, regardless of whether the worker has
+        # caught up yet.
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export ROUGHCUT_CACHE_DIR="$PWD/burst-cache"
+          python3.11 - <<'PY'
+          import os, time
+          from pathlib import Path
+          from roughcut_core import jobs
+
+          cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
+          cache.mkdir(parents=True, exist_ok=True)
+
+          t0 = time.time()
+          ids = [jobs.spawn(cache, "_test_noop", {"burst": i}).job_id for i in range(20)]
+          spawn_elapsed = time.time() - t0
+          print(f"20 spawns in {spawn_elapsed:.3f}s")
+          assert len(set(ids)) == 20
+          assert spawn_elapsed < 3.0, f"20 spawns took {spawn_elapsed:.2f}s — too slow"
+
+          t1 = time.time()
+          listed = jobs.list_jobs(cache)
+          list_elapsed = time.time() - t1
+          print(f"list_jobs({len(listed)} jobs) in {list_elapsed:.3f}s")
+          assert len(listed) >= 20
+          assert list_elapsed < 1.0, f"list_jobs took {list_elapsed:.2f}s — target <1s"
+          print("OK")
+          PY
+
+      - name: Documentary mode — read_transcript pagination + search hit
+        # Lay down a synthetic transcript with two distinct phrases, then
+        # exercise read_transcript pagination and a search_transcripts hit.
+        # No mlx-whisper involved.
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export ROUGHCUT_CACHE_DIR="$PWD/docs-cache"
+          mkdir -p docs-cache/transcripts/test
+          python3.11 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from roughcut_core import documentary
+          from roughcut_core.models import Segment, Transcript
+
+          cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
+          src = cache / "fake.mp4"; src.touch()
+          path = cache / "transcripts" / "test" / "fake.json"
+          # Long enough to force pagination at a small max_chars.
+          segments = [Segment(text=f"Wisconsin chunk {i} " + "x" * 400,
+                              start=float(i), end=float(i + 1)) for i in range(8)]
+          path.write_text(Transcript(
+              source_path=src, source_hash="h", duration=8.0,
+              language="en", segments=segments,
+          ).model_dump_json())
+
+          page1 = documentary.read_transcript(path, max_chars=1500)
+          assert page1["has_more"] is True, page1
+          assert page1["segments"][0]["text"].startswith("Wisconsin chunk 0")
+
+          page2 = documentary.read_transcript(
+              path, start_segment=page1["next_start"], max_chars=1500,
+          )
+          assert page2["segments"][0]["idx"] == page1["next_start"]
+
+          hits = documentary.search_transcripts("Wisconsin", cache)
+          assert hits["result_count"] >= 1, hits
+          assert "Wisconsin" in hits["results"][0]["matched_text"]
+          print("OK")
+          PY
+
   release:
     needs: smoke-test
     runs-on: ubuntu-latest

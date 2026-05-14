@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import TextContent
 
-from roughcut_core import broll, cache_io, clips, fcpxml, jobs, models_catalog, system_status, transcribe
+from roughcut_core import broll, cache_io, clips, documentary, fcpxml, jobs, models_catalog, system_status, transcribe
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
 from roughcut_mcp.responses import ToolResponse, abs_dir, abs_file, abs_path, cache_dir, to_error
@@ -77,6 +77,26 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.GET_SYSTEM_STATUS)
     def get_system_status() -> ToolResponse:
         return _get_system_status()
+
+    # ----- Documentary / unscripted mode (sync; reads cached JSON) ---------
+
+    @mcp.tool(description=desc.READ_TRANSCRIPT)
+    def read_transcript(
+        transcript_path: str, start_segment: int = 0,
+        end_segment: int | None = None, max_chars: int = 900_000,
+    ) -> ToolResponse:
+        return _read_transcript(transcript_path, start_segment, end_segment, max_chars)
+
+    @mcp.tool(description=desc.SEARCH_TRANSCRIPTS)
+    def search_transcripts(
+        query: str, folder_path: str | None = None,
+        max_results: int = 20, context_segments: int = 2,
+    ) -> ToolResponse:
+        return _search_transcripts(query, folder_path, max_results, context_segments)
+
+    @mcp.tool(description=desc.SUMMARIZE_CLIP)
+    def summarize_clip(transcript_path: str) -> ToolResponse:
+        return _summarize_clip(transcript_path)
 
     # ----- Async-job tools (return job_id, work in subprocess) ---------------
 
@@ -422,3 +442,48 @@ def _get_system_status() -> ToolResponse:
         "problems": problems,
         "details": status,
     })
+
+
+def _read_transcript(
+    transcript_path: str, start_segment: int, end_segment: int | None, max_chars: int,
+) -> ToolResponse:
+    p = abs_file(transcript_path)
+    if isinstance(p, ToolResponse):
+        return p
+    try:
+        summary = documentary.read_transcript(p, start_segment, end_segment, max_chars)
+    except Exception as e:  # noqa: BLE001
+        log.exception("read_transcript failed")
+        return to_error(e)
+    return ToolResponse(ok=True, summary=summary)
+
+
+def _search_transcripts(
+    query: str, folder_path: str | None, max_results: int, context_segments: int,
+) -> ToolResponse:
+    folder: Path | None = None
+    if folder_path:
+        folder_resolved = abs_dir(folder_path)
+        if isinstance(folder_resolved, ToolResponse):
+            return folder_resolved
+        folder = folder_resolved
+    try:
+        summary = documentary.search_transcripts(
+            query, cache_dir(None), folder, max_results, context_segments,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("search_transcripts failed")
+        return to_error(e)
+    return ToolResponse(ok=True, summary=summary)
+
+
+def _summarize_clip(transcript_path: str) -> ToolResponse:
+    p = abs_file(transcript_path)
+    if isinstance(p, ToolResponse):
+        return p
+    try:
+        summary = documentary.summarize_clip(p)
+    except Exception as e:  # noqa: BLE001
+        log.exception("summarize_clip failed")
+        return to_error(e)
+    return ToolResponse(ok=True, summary=summary)

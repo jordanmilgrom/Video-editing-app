@@ -1,33 +1,36 @@
-"""Async-job infrastructure for long-running roughcut tools.
+"""Async-job infrastructure: queue + persistent worker pool.
 
-Claude Desktop's tool-call timeout is shorter than a real transcription
-of a 60-minute podcast. The fix is to return immediately with a job_id
-and run the work in a detached subprocess that persists its progress to
-disk. A second tool (`check_job_status`) polls the JSON; cancellation
-SIGKILLs the pid; on server restart we scan for jobs whose pid is dead
-and mark them `interrupted`.
+v0.6.3 redesign. The v0.6.0 model was "one subprocess per job." It
+deadlocked Claude Desktop when 31 transcribes fired in parallel:
+31 mlx-whisper Python processes loading ~150 MB each + GPU contention.
+v0.6.3 introduces:
 
-Deterministic job ids mean a re-run with identical inputs is a free
-cache hit: same `job_id = sha256(tool + abspath + size + mtime + model)`,
-status `succeeded` → return the cached `result_path`.
+- A single persistent worker subprocess per cache dir (configurable
+  pool size via ROUGHCUT_WORKER_POOL_SIZE; default 1, which is
+  correct for mlx-whisper since the Metal GPU doesn't parallelize
+  whisper instances usefully).
+- An on-disk queue (`cache/jobs/queue.txt`, fcntl-locked).
+- The MCP server's "spawn a job" path is now: write job record +
+  append job_id to queue + ensure worker is running. No subprocess
+  Popen on the hot path. `check_job_status` / `list_jobs` / `cancel`
+  only read/write JSON files — never IPC with the worker.
 
-State diagram:
-                                            +------> succeeded
-                                            |
-  started ---> running -- subprocess work --+------> failed
-                  ^                         |
-                  |                         +------> cancelled (SIGKILLed)
-                  |
-                  +-------- server restart ------ interrupted
-                  (pid no longer alive when server scanned at startup)
+State diagram (v0.6.3):
 
-resume_job() flips an interrupted/failed job back to `started` and
-spawns a fresh worker. Re-extracted intermediate state (e.g. cached
-audio extract) is reused via the underlying transcribe cache.
+   queued  →  running  →  succeeded
+      |                    failed
+      |                    cancelled (SIGTERM)
+      |
+      +-- server restart → interrupted (worker pid no longer alive)
+
+Backward compat: `started` (v0.6.0..v0.6.2) is treated as `queued`.
+Re-using `started` keeps existing on-disk job records readable.
 """
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -35,19 +38,20 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from pydantic import BaseModel, Field
 
 JobStatus = Literal[
-    "started", "running", "succeeded", "failed", "interrupted", "cancelled"
+    "started", "queued", "running", "succeeded",
+    "failed", "interrupted", "cancelled",
 ]
 
-# Tools we expose as async jobs. Anything not in this list stays synchronous
-# in the MCP layer.
 ASYNC_TOOLS = frozenset({
     "transcribe_video",
+    "prewarm_model",
     "cluster_takes_by_silence",
     "align_takes_to_script",
     "detect_multicam_groups",
@@ -55,12 +59,25 @@ ASYNC_TOOLS = frozenset({
     "pick_angle_per_segment",
 })
 
+# Concurrency cap for the persistent worker pool. mlx-whisper on Apple
+# Silicon doesn't parallelize across whisper instances usefully; the
+# default is 1. Power users can bump via ROUGHCUT_WORKER_POOL_SIZE.
+DEFAULT_POOL_SIZE = 1
+
+
+def pool_size() -> int:
+    try:
+        n = int(os.environ.get("ROUGHCUT_WORKER_POOL_SIZE", "") or DEFAULT_POOL_SIZE)
+        return max(1, n)
+    except ValueError:
+        return DEFAULT_POOL_SIZE
+
 
 class Job(BaseModel):
     job_id: str
     tool_name: str
     args: dict[str, Any]
-    status: JobStatus = "started"
+    status: JobStatus = "queued"
     progress_pct: float | None = None
     current_step: str | None = None
     started_at: float
@@ -75,12 +92,6 @@ class Job(BaseModel):
 
 
 def compute_job_id(tool_name: str, args: dict[str, Any]) -> str:
-    """Deterministic id from tool + inputs. Re-running with identical
-    inputs hits the same job folder and skips the work.
-
-    For tools that take a path, we include the file's (size, mtime_ns)
-    so editing the source invalidates the cache.
-    """
     parts: list[str] = [tool_name]
     for k in sorted(args):
         v = args[k]
@@ -107,6 +118,18 @@ def jobs_dir(cache_dir: Path) -> Path:
 
 def path_for(cache_dir: Path, job_id: str) -> Path:
     return jobs_dir(cache_dir) / f"{job_id}.json"
+
+
+def queue_path(cache_dir: Path) -> Path:
+    return jobs_dir(cache_dir) / "queue.txt"
+
+
+def _queue_lock_path(cache_dir: Path) -> Path:
+    return jobs_dir(cache_dir) / "queue.lock"
+
+
+def _worker_pid_path(cache_dir: Path, slot: int = 0) -> Path:
+    return jobs_dir(cache_dir) / f"worker-{slot}.pid"
 
 
 def read(cache_dir: Path, job_id: str) -> Job | None:
@@ -137,18 +160,25 @@ def list_jobs(cache_dir: Path, status: JobStatus | None = None) -> list[Job]:
     return out
 
 
-def spawn(cache_dir: Path, tool_name: str, args: dict[str, Any]) -> Job:
-    """Create a job and start its worker subprocess.
+# ---------------------------------------------------------------------------
+# Enqueue + worker management (hot path)
+# ---------------------------------------------------------------------------
 
-    Idempotent: if a `succeeded` job with the same id already exists,
-    return it without spawning. If a `running` job exists with a live
-    pid, also return that one. Anything else (failed / interrupted /
-    cancelled) gets a fresh worker.
+
+def spawn(cache_dir: Path, tool_name: str, args: dict[str, Any]) -> Job:
+    """Enqueue a job. Fast — never blocks on subprocess startup.
+
+    Idempotent: if a job with the same id is already `succeeded`,
+    `queued`, or live-`running`, we return that record without
+    re-enqueueing.
     """
     job_id = compute_job_id(tool_name, args)
     existing = read(cache_dir, job_id)
     if existing:
         if existing.status == "succeeded":
+            return existing
+        if existing.status in ("queued", "started"):
+            _ensure_workers(cache_dir)
             return existing
         if existing.status == "running" and existing.pid and _alive(existing.pid):
             return existing
@@ -156,35 +186,120 @@ def spawn(cache_dir: Path, tool_name: str, args: dict[str, Any]) -> Job:
     now = time.time()
     job = Job(
         job_id=job_id, tool_name=tool_name, args=args,
-        status="started", started_at=now, updated_at=now,
+        status="queued", started_at=now, updated_at=now,
     )
     write(cache_dir, job)
+    _append_to_queue(cache_dir, job_id)
+    _ensure_workers(cache_dir)
+    return job
 
-    log_path = jobs_dir(cache_dir) / f"{job_id}.log"
+
+def _append_to_queue(cache_dir: Path, job_id: str) -> None:
+    q = queue_path(cache_dir)
+    with _filelock(_queue_lock_path(cache_dir)):
+        # Use a flat newline-delimited list. The worker pops from the head.
+        with open(q, "a", encoding="utf-8") as f:
+            f.write(f"{job_id}\n")
+
+
+def pop_from_queue(cache_dir: Path) -> str | None:
+    """Atomic pop of the next job_id, or None if queue is empty."""
+    q = queue_path(cache_dir)
+    with _filelock(_queue_lock_path(cache_dir)):
+        if not q.exists():
+            return None
+        lines = q.read_text(encoding="utf-8").splitlines()
+        # Skip blanks.
+        lines = [l for l in lines if l.strip()]
+        if not lines:
+            q.unlink(missing_ok=True)
+            return None
+        first, rest = lines[0], lines[1:]
+        if rest:
+            tmp = q.with_suffix(".txt.tmp")
+            tmp.write_text("\n".join(rest) + "\n", encoding="utf-8")
+            os.replace(tmp, q)
+        else:
+            q.unlink(missing_ok=True)
+        return first
+
+
+def queue_depth(cache_dir: Path) -> int:
+    q = queue_path(cache_dir)
+    if not q.exists():
+        return 0
+    return sum(1 for line in q.read_text(encoding="utf-8").splitlines() if line.strip())
+
+
+def _ensure_workers(cache_dir: Path) -> list[int]:
+    """Make sure the configured pool of workers is alive. Returns live pids.
+
+    Cheap to call repeatedly: if every slot's pid is alive, this is a
+    handful of `os.kill(pid, 0)` checks. New workers only spawn when a
+    slot has no live process.
+    """
+    live: list[int] = []
+    for slot in range(pool_size()):
+        pid_file = _worker_pid_path(cache_dir, slot)
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                if _alive(pid):
+                    live.append(pid)
+                    continue
+            except (ValueError, OSError):
+                pass
+        new_pid = _spawn_worker(cache_dir, slot)
+        live.append(new_pid)
+    return live
+
+
+def _spawn_worker(cache_dir: Path, slot: int) -> int:
+    """Spawn a detached worker subprocess and return its pid."""
+    log_path = jobs_dir(cache_dir) / f"worker-{slot}.log"
     log_fh = open(log_path, "ab")
     env = os.environ.copy()
     env["ROUGHCUT_CACHE_DIR"] = str(cache_dir)
-    # Detached: new session so a Claude Desktop quit doesn't take the
-    # worker with it. stdin closed, stdout/stderr to a log file.
+    env["ROUGHCUT_WORKER_SLOT"] = str(slot)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "roughcut_core.worker", job_id],
+        [sys.executable, "-m", "roughcut_core.worker"],
         env=env,
         stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh,
         start_new_session=True,
         close_fds=True,
     )
-    job.pid = proc.pid
-    write(cache_dir, job)
-    return job
+    _worker_pid_path(cache_dir, slot).write_text(str(proc.pid))
+    return proc.pid
+
+
+# ---------------------------------------------------------------------------
+# Cancel + recovery
+# ---------------------------------------------------------------------------
 
 
 def cancel(cache_dir: Path, job_id: str) -> Job:
-    """SIGTERM then (if still alive after 2s) SIGKILL. Updates status."""
+    """Cancel a job.
+
+    - If queued: just flip status. Worker skips on pop.
+    - If running: SIGTERM the worker (it owns this job exclusively
+      under pool_size=1). The worker's signal handler updates the job
+      to "cancelled" and exits; the next `_ensure_workers` call
+      respawns a fresh worker to drain the rest of the queue.
+    - If already terminal: no-op.
+    """
     job = read(cache_dir, job_id)
     if job is None:
         raise FileNotFoundError(job_id)
     if job.status in ("succeeded", "failed", "cancelled"):
         return job
+
+    if job.status in ("queued", "started"):
+        job.status = "cancelled"
+        job.current_step = "cancelled (was queued)"
+        write(cache_dir, job)
+        return job
+
+    # status == "running": signal the worker that owns this job.
     if job.pid and _alive(job.pid):
         try:
             os.killpg(os.getpgid(job.pid), signal.SIGTERM)
@@ -206,9 +321,11 @@ def cancel(cache_dir: Path, job_id: str) -> Job:
 
 
 def recover_interrupted(cache_dir: Path) -> list[Job]:
-    """Mark every `running` job whose pid is no longer alive as `interrupted`.
+    """At server startup, reconcile records with reality.
 
-    Called at server startup. Returns the list it touched, for logging.
+    Jobs marked `running` whose pid is dead → `interrupted`.
+    Jobs marked `queued` whose worker is gone get re-spawned via
+    `_ensure_workers` if anything is left in the queue.
     """
     touched: list[Job] = []
     for j in list_jobs(cache_dir):
@@ -217,11 +334,18 @@ def recover_interrupted(cache_dir: Path) -> list[Job]:
             j.current_step = "interrupted (server restart / process death)"
             write(cache_dir, j)
             touched.append(j)
+    # If the queue has work, make sure the pool is alive.
+    if queue_depth(cache_dir) > 0:
+        _ensure_workers(cache_dir)
     return touched
 
 
+# ---------------------------------------------------------------------------
+# Primitives
+# ---------------------------------------------------------------------------
+
+
 def _alive(pid: int) -> bool:
-    """True if `pid` is a live process owned by us. SIGNAL 0 doesn't kill."""
     if pid <= 0:
         return False
     try:
@@ -231,3 +355,22 @@ def _alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+@contextmanager
+def _filelock(path: Path):
+    """fcntl-based exclusive lock, scoped to a `with` block.
+
+    Cheap on macOS / Linux. The lock file is created on first use and
+    persists between calls — only the OS-level lock is short-lived.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)

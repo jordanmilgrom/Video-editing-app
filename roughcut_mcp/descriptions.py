@@ -152,6 +152,38 @@ RESUME_JOB = (
     "no work. If still running, returns an error — `cancel_job` first."
 )
 
+READ_TRANSCRIPT = (
+    "Page through a saved transcript JSON. Returns segments with "
+    "start/end timecodes, capped at `max_chars` so the result stays "
+    "under Desktop's 1 MB cap. Use this in documentary mode to "
+    "actually READ a clip after `transcribe_video` finishes — the "
+    "transcribe summary only gives you 200 chars.\n\n"
+    "`transcript_path` is what `transcribe_video` returns. "
+    "`start_segment` defaults to 0; on a long clip, follow up with "
+    "`start_segment=next_start` from the previous response to read "
+    "the rest. `has_more` tells you when you're done. Synchronous."
+)
+
+SEARCH_TRANSCRIPTS = (
+    "Case-insensitive substring search across every cached transcript "
+    "in the active cache dir. Returns top hits with a few segments of "
+    "context on either side. Lets you find moments matching a topic "
+    "across an entire shoot without reading anything in full.\n\n"
+    "Optional `folder_path` scopes the search to transcripts whose "
+    "source video lives under that folder. `context_segments` "
+    "controls the window (default 2). Synchronous."
+)
+
+SUMMARIZE_CLIP = (
+    "Deterministic snippet view of one clip's transcript: opening "
+    "200 chars, closing 200 chars, longest continuous segment, total "
+    "speech length, segment count, duration. NO LLM call — just facts "
+    "about the transcript shape.\n\n"
+    "Use this to scan many clips fast after a batch `transcribe_video` "
+    "pass, then `read_transcript` only the ones that look interesting. "
+    "Synchronous."
+)
+
 PREWARM_MODEL = (
     "Pre-fetch a whisper model in the background so a later transcribe "
     "is instant. Use this when you know the user will need `large-v3` "
