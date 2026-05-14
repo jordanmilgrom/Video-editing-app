@@ -96,6 +96,31 @@ find "$BUILD/server" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || 
 cp "$PROJECT_ROOT/dxt/manifest.json" "$BUILD/manifest.json"
 cp "$PROJECT_ROOT/dxt/main.py" "$BUILD/server/main.py"
 
+echo "==> Bundle whisper-small MLX model (~480 MB; offline first-run transcribe)"
+# Set ROUGHCUT_SKIP_MODEL_BUNDLE=1 to skip when working offline. Production
+# CI builds must NOT set this — the bundled model is the whole point of v0.6.1.
+WHISPER_MODEL_DIR="$BUILD/server/models/whisper-small"
+if [ -n "${ROUGHCUT_SKIP_MODEL_BUNDLE:-}" ]; then
+  echo "    (skipped: ROUGHCUT_SKIP_MODEL_BUNDLE=$ROUGHCUT_SKIP_MODEL_BUNDLE)"
+  mkdir -p "$WHISPER_MODEL_DIR"
+  echo "ROUGHCUT_SKIP_MODEL_BUNDLE was set; rebuild without it for a shippable .dxt." \
+    > "$WHISPER_MODEL_DIR/.placeholder"
+else
+  python3 -m pip install --quiet --break-system-packages 'huggingface_hub>=0.20' >/dev/null
+  mkdir -p "$WHISPER_MODEL_DIR"
+  python3 - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="mlx-community/whisper-small-mlx",
+    local_dir="$WHISPER_MODEL_DIR",
+)
+PY
+  test -f "$WHISPER_MODEL_DIR/config.json" || {
+    echo "Bundling failed: $WHISPER_MODEL_DIR/config.json missing" >&2
+    exit 1
+  }
+fi
+
 echo "==> Validate manifest"
 npx --yes @anthropic-ai/dxt@latest validate "$BUILD/manifest.json"
 

@@ -15,12 +15,13 @@ from pathlib import Path
 
 
 def collect(cache_dir: Path) -> dict:
+    from roughcut_core import models_catalog
     return {
         "python": _python_info(),
         "ffmpeg": _binary_check("ffmpeg", ["-version"]),
         "ffprobe": _binary_check("ffprobe", ["-version"]),
         "mlx_whisper_importable": _mlx_whisper_check(),
-        "whisper_model_cached": _whisper_model_check(),
+        "models": _models_block(models_catalog.inventory()),
         "cache_dir": _cache_dir_check(cache_dir),
         "disk_free_gb": _disk_free_gb(cache_dir),
         "env": {
@@ -29,6 +30,24 @@ def collect(cache_dir: Path) -> dict:
             "ROUGHCUT_BROLL_DIR": os.environ.get("ROUGHCUT_BROLL_DIR"),
             "ROUGHCUT_SCRIPT_PATH": os.environ.get("ROUGHCUT_SCRIPT_PATH"),
         },
+    }
+
+
+def _models_block(items: list[dict]) -> dict:
+    """Roll the models inventory into the {ok, ...} shape `collect` uses.
+
+    `ok=True` iff at least one model is on disk — otherwise the first
+    transcribe will block on a multi-minute download.
+    """
+    any_cached = any(m["cached"] for m in items)
+    return {
+        "ok": any_cached,
+        "available": items,
+        "hint": None if any_cached else (
+            "No whisper models cached yet. The first `transcribe_video` "
+            "will download one (~480 MB for `small`, ~3 GB for `large-v3`). "
+            "Call `prewarm_model('small')` to pre-fetch in the background."
+        ),
     }
 
 
@@ -66,16 +85,6 @@ def _mlx_whisper_check() -> dict:
             hint = ("libmlx.dylib didn't load. The .dxt build is missing the "
                     "mlx-metal wheel. Rebuild with bash scripts/build-dxt.sh.")
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "hint": hint}
-
-
-def _whisper_model_check() -> dict:
-    """The model gets fetched on first transcribe — flag whether it's already on disk."""
-    home = Path.home() / ".cache" / "huggingface"
-    if not home.is_dir():
-        return {"ok": False, "error": "HuggingFace cache dir missing",
-                "hint": "First transcribe will download the model (~1.5 GB)."}
-    matches = list(home.rglob("*whisper-large*"))
-    return {"ok": bool(matches), "matches": [str(m) for m in matches[:3]]}
 
 
 def _cache_dir_check(cache_dir: Path) -> dict:
