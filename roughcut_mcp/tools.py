@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import TextContent
 
-from roughcut_core import broll, cache_io, clips, fcpxml, jobs, system_status, transcribe
+from roughcut_core import broll, cache_io, clips, fcpxml, jobs, models_catalog, system_status, transcribe
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
 from roughcut_mcp.responses import ToolResponse, abs_dir, abs_file, abs_path, cache_dir, to_error
@@ -83,7 +83,7 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.TRANSCRIBE_VIDEO)
     def transcribe_video(
         video_path: str, language: str = "auto",
-        model: str = transcribe.DEFAULT_WHISPER_MODEL,
+        model: str = models_catalog.DEFAULT_MODEL,
     ) -> ToolResponse:
         path = abs_file(video_path)
         if isinstance(path, ToolResponse):
@@ -91,6 +91,16 @@ def register_tools(mcp: FastMCP) -> None:
         return _spawn("transcribe_video", {
             "video_path": str(path), "language": language, "model": model,
         })
+
+    @mcp.tool(description=desc.PREWARM_MODEL)
+    def prewarm_model(model_name: str = "large-v3") -> ToolResponse:
+        if model_name not in models_catalog.SHORT_TO_HF:
+            return ToolResponse(
+                ok=False, error="invalid_spec",
+                message=(f"unknown model '{model_name}'. "
+                         f"Choices: {list(models_catalog.SHORT_TO_HF)}"),
+            )
+        return _spawn("prewarm_model", {"model_name": model_name})
 
     @mcp.tool(description=desc.CLUSTER_TAKES_BY_SILENCE)
     def cluster_takes_by_silence(
@@ -179,11 +189,6 @@ def register_tools(mcp: FastMCP) -> None:
 
 
 def _spawn(tool_name: str, args: dict) -> ToolResponse:
-    """Spawn a worker subprocess (or return cached `succeeded` job).
-
-    Returns a small ToolResponse pointing at the job_id. The agent
-    polls `check_job_status(job_id)` from here.
-    """
     cdir = cache_dir(None)
     try:
         job = jobs.spawn(cdir, tool_name, args)
@@ -209,7 +214,6 @@ def _check_job_status(job_id: str) -> ToolResponse:
         return ToolResponse(ok=False, error="not_a_file",
                             message=f"no job with id {job_id}",
                             summary={"hint": "Use list_jobs to see recent jobs."})
-    # If status claims `running` but pid is dead, reflect reality.
     if job.status in ("started", "running") and (not job.pid or not jobs._alive(job.pid)):
         job.status = "interrupted"
         job.current_step = "interrupted (worker process died)"
@@ -246,11 +250,6 @@ def _cancel_job(job_id: str) -> ToolResponse:
 
 
 def _resume_job(job_id: str) -> ToolResponse:
-    """Re-run a failed / interrupted / cancelled job from scratch.
-
-    Per-step caches (extracted WAV, downloaded model) survive across
-    runs, so resuming is much cheaper than the first attempt.
-    """
     cdir = cache_dir(None)
     job = jobs.read(cdir, job_id)
     if job is None:
@@ -266,16 +265,12 @@ def _resume_job(job_id: str) -> ToolResponse:
     if job.status == "running" and job.pid and jobs._alive(job.pid):
         return ToolResponse(ok=False, error="invalid_spec",
                             message=f"job {job_id} is still running; cancel it first")
-    # Reset and re-spawn with identical args.
     fresh = jobs.spawn(cdir, job.tool_name, job.args)
     return ToolResponse(ok=True, summary={
         "job_id": fresh.job_id, "status": fresh.status,
         "poll_with": f"check_job_status('{fresh.job_id}')",
         "note": "resumed from cached intermediate state where possible",
     })
-
-
-# ----- Synchronous tool implementations -------------------------------------
 
 
 def _list_clips(folder: str, recursive: bool) -> ToolResponse:

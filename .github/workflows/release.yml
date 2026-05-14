@@ -1,15 +1,5 @@
 # Build roughcut.dxt on every vX.Y.Z tag, run an import smoke test on
 # a real macOS arm64 runner, and upload the artifact to the Release.
-#
-# Three jobs:
-#   1. build      — Linux-hosted cross-build. Outputs roughcut.dxt.
-#   2. smoke-test — macos-14 (arm64). Unpacks the .dxt, runs the bundled
-#                   python interpreter, imports mlx_whisper. Catches the
-#                   class of regression where a native dylib gets dropped
-#                   from the wheel set during cross-platform pip download.
-#   3. release    — Linux-hosted. Creates / updates the GitHub Release
-#                   and attaches roughcut.dxt. Only runs if smoke-test
-#                   passed.
 
 name: Release
 
@@ -60,21 +50,17 @@ jobs:
       - name: Unpack the .dxt
         run: |
           mkdir unpacked
-          # .dxt files are zip archives.
           unzip -q roughcut.dxt -d unpacked
           test -x unpacked/server/python/bin/python3.11
 
       - name: Import smoke test — mlx_whisper must load (catches missing libmlx.dylib)
-        # The actual regression we're catching: `import mlx.core` triggers the
-        # native C extension load, which is where dyld will fail to resolve
-        # @rpath/libmlx.dylib if mlx-metal didn't make it into the bundle.
         run: |
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export PATH="$PWD/unpacked/server/python/bin:$PWD/unpacked/server/bin:$PATH"
           python3.11 -c "
           import sys
-          import mlx.core         # loads core.cpython-311-darwin.so → libmlx.dylib
-          import mlx_whisper      # pulls in mlx + numba + etc.
+          import mlx.core
+          import mlx_whisper
           print(f'python      : {sys.version.split()[0]}')
           print(f'mlx_whisper : {getattr(mlx_whisper, \"__version__\", \"?\")}')
           print('OK')
@@ -85,11 +71,34 @@ jobs:
           unpacked/server/bin/ffmpeg -version | head -1
           unpacked/server/bin/ffprobe -version | head -1
 
+      - name: whisper-small must be bundled (v0.6.1 promise)
+        run: |
+          test -d unpacked/server/models/whisper-small
+          test -f unpacked/server/models/whisper-small/config.json
+          du -sh unpacked/server/models/whisper-small
+
+      - name: Offline transcribe smoke test (HF_HUB_OFFLINE=1)
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
+          export PATH="$PWD/unpacked/server/python/bin:$PWD/unpacked/server/bin:$PATH"
+          ffmpeg -y -loglevel error -f lavfi -i "anullsrc=r=16000:cl=mono" -t 2 /tmp/silence.wav
+          mkdir -p /tmp/rc-cache
+          python3.11 - <<'PY'
+          from pathlib import Path
+          from roughcut_core import models_catalog, transcribe
+          resolved = models_catalog.resolve("small")
+          assert Path(resolved).is_dir(), f"resolved 'small' to non-path: {resolved}"
+          print(f"resolved small -> {resolved}")
+          t = transcribe.transcribe(
+              Path("/tmp/silence.wav"), Path("/tmp/rc-cache"), model=resolved,
+          )
+          print(f"offline transcribe ok: {len(t.segments)} segments, lang={t.language}")
+          PY
+
       - name: Job-system end-to-end smoke test
-        # Spawns a tiny _test_noop job in the unpacked bundle, polls until
-        # succeeded, then exercises: cancel_job on an unknown id, list_jobs,
-        # and the startup recover_interrupted scan. Catches breakage in the
-        # subprocess plumbing without burning time on a real transcription.
         run: |
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export ROUGHCUT_CACHE_DIR="$PWD/smoke-cache"
@@ -101,12 +110,10 @@ jobs:
           cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
           cache.mkdir(parents=True, exist_ok=True)
 
-          # 1. Spawn — must return immediately with a job_id.
           j = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
           assert j.job_id, f"no job_id: {j}"
           print(f"spawned job_id={j.job_id} status={j.status}")
 
-          # 2. Poll for succeeded.
           deadline = time.time() + 10
           last = j
           while time.time() < deadline:
@@ -118,12 +125,9 @@ jobs:
           assert last.result_summary == {"echo": "ok"}, last.result_summary
           print(f"job succeeded: result_summary={last.result_summary}")
 
-          # 3. Idempotency: a re-spawn with same args returns the cached job.
           j2 = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
           assert j2.job_id == j.job_id and j2.status == "succeeded"
-          print(f"idempotent: re-spawn returned cached job_id={j2.job_id}")
 
-          # 4. Cancel: forge a fake running job, cancel it, status flips.
           fake = jobs.Job(
               job_id="bogus", tool_name="transcribe_video", args={},
               status="running", started_at=time.time(), updated_at=time.time(),
@@ -133,7 +137,6 @@ jobs:
           out = jobs.cancel(cache, "bogus")
           assert out.status == "cancelled", out
 
-          # 5. Recover scan: a 'running' job with a dead pid → interrupted.
           fake2 = jobs.Job(
               job_id="dead", tool_name="transcribe_video", args={},
               status="running", started_at=time.time(), updated_at=time.time(),
@@ -143,9 +146,7 @@ jobs:
           touched = jobs.recover_interrupted(cache)
           ids = {t.job_id for t in touched}
           assert "dead" in ids, ids
-          print(f"recover marked: {ids}")
 
-          # 6. Unknown id: read() returns None (caller maps to clean error).
           assert jobs.read(cache, "no-such-id") is None
           print("OK")
           PY
