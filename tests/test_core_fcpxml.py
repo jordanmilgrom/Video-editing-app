@@ -114,3 +114,49 @@ def test_fcpxml_emits_one_asset_per_unique_source(tmp_path: Path) -> None:
     root = _parse(out)
     assets = root.findall("./resources/asset")
     assert len(assets) == 1
+
+
+def test_fcpxml_dedupes_six_reuses_of_one_source(tmp_path: Path) -> None:
+    """v0.6.5 regression (P0 #1 / #21).
+
+    A documentary spine that revisits the same interview clip six
+    times must emit exactly one <asset> and six <asset-clip ref=...>
+    all pointing at it. The earlier emitter could return two assets
+    when the agent handed the same file under two surface
+    representations (with and without a `./`, double slashes, etc.) —
+    Final Cut would then reject with "Invalid edit with no respective
+    media". The fix normalizes via Path.resolve() before keying the
+    dedup map.
+    """
+    src = tmp_path / "interview.mov"
+    src.write_bytes(b"x")
+    # Six surface forms of the same file. They all resolve to the
+    # same path; we want exactly one asset and six clips referencing it.
+    surface_forms: list[Path] = [
+        src,
+        Path(str(src)),
+        Path(str(tmp_path / "." / "interview.mov")),
+        Path(str(tmp_path / "./interview.mov")),
+        src.resolve(),
+        Path(str(src)),  # plain duplicate
+    ]
+    spec = SequenceSpec(
+        aroll=[
+            ARollSegment(source_path=p, in_sec=i * 5.0, out_sec=i * 5.0 + 2.0)
+            for i, p in enumerate(surface_forms)
+        ],
+    )
+    out = tmp_path / "out.fcpxml"
+    fcpxml.write_fcpxml(spec, out)
+    root = _parse(out)
+    assets = root.findall("./resources/asset")
+    assert len(assets) == 1, (
+        f"expected 1 asset for 6 reuses, got {len(assets)} — FCP would reject"
+    )
+    asset_id = assets[0].attrib["id"]
+    clips = root.findall("./library/event/project/sequence/spine/asset-clip")
+    assert len(clips) == 6
+    for c in clips:
+        assert c.attrib["ref"] == asset_id, (
+            f"asset-clip ref={c.attrib['ref']!r} doesn't match asset id={asset_id!r}"
+        )

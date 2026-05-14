@@ -130,6 +130,51 @@ def search_transcripts(
     }
 
 
+def lookup_transcript_by_video_path(video_path: Path, cache_dir: Path) -> dict:
+    """Find the cached transcript JSON for a given source video.
+
+    Scans every transcript under `cache_dir/transcripts/**/*.json` and
+    returns the first one whose `source_path` resolves to the same file
+    as `video_path`. v0.6.5 P2 #12: the agent should never have to
+    guess the cache layout — pass the absolute video path you started
+    with and get back the corresponding transcript path.
+
+    Returns `{"found": False, "video_path": ...}` if no match.
+    """
+    target = Path(video_path).resolve(strict=False)
+    transcripts_root = Path(cache_dir) / "transcripts"
+    if not transcripts_root.is_dir():
+        return {"found": False, "video_path": str(target),
+                "reason": "no_transcripts_cached"}
+    candidates: list[dict] = []
+    for path in sorted(transcripts_root.rglob("*.json")):
+        try:
+            t = Transcript.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if Path(t.source_path).resolve(strict=False) == target:
+            candidates.append({
+                "transcript_path": str(path),
+                "model_dir": path.parent.name,
+                "segment_count": len(t.segments),
+                "duration_sec": round(t.duration, 3),
+                "language": t.language,
+            })
+    if not candidates:
+        return {"found": False, "video_path": str(target),
+                "reason": "no_match",
+                "hint": "Run transcribe_video(video_path=...) first."}
+    return {
+        "found": True,
+        "video_path": str(target),
+        "match_count": len(candidates),
+        "matches": candidates,
+        # Convenience: prefer the largest-model transcript when several
+        # exist (more accurate). Agents that want all can read `matches`.
+        "best_match": max(candidates, key=lambda c: c["segment_count"]),
+    }
+
+
 def summarize_clip(transcript_path: Path) -> dict:
     """Deterministic per-clip snippet view — no LLM call.
 

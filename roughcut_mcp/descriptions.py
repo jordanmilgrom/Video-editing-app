@@ -1,4 +1,16 @@
-"""Tool descriptions, written for the agent (when to use, not just what)."""
+"""Tool descriptions, written for the agent (when to use, not just what).
+
+Every description follows the v0.6.5 contract:
+
+  1. One-sentence summary at the top.
+  2. WHEN to call this tool vs. its neighbors (the discriminating fact).
+  3. Critical params with short defaults / value ranges.
+  4. Async tools end with `_ASYNC_NOTE` describing the poll pattern.
+
+Response shape every tool returns: `data` (rich result dict),
+`next_steps` (suggested follow-up calls), and on failure `error`/`message`.
+The legacy field `summary` is still populated as a mirror of `data`.
+"""
 
 # ---- shared / sync --------------------------------------------------------
 
@@ -7,8 +19,8 @@ LIST_CLIPS = (
     "codec, duration, frame rate, resolution, and size. Fast and "
     "synchronous — no job_id involved.\n\n"
     "Call this FIRST when starting a rough cut. `folder` MUST be "
-    "absolute. The summary returns `clip_paths` (just the filenames) "
-    "and `clips_path` (a JSON file with full ClipMeta)."
+    "absolute. The result's `data` returns `clip_paths` (just the "
+    "filenames) and `clips_path` (a JSON file with full ClipMeta)."
 )
 
 GET_PROJECT_PATHS = (
@@ -21,34 +33,74 @@ GET_PROJECT_PATHS = (
 GET_SYSTEM_STATUS = (
     "Preflight diagnostics: bundled python loadable, ffmpeg/ffprobe "
     "executable, libmlx.dylib resolvable (i.e. `import mlx_whisper` "
-    "works), whisper model cached, cache dir writable, free disk space.\n\n"
+    "works), whisper model cached, cache dir writable, free disk space, "
+    "worker pool size + live workers + queue depth.\n\n"
     "Call this when the user reports something broken before diving "
-    "into specific tools. The `problems` field of the summary lists "
+    "into specific tools. The `problems` field of `data` lists "
     "the keys that failed; `details` has the full picture."
 )
 
+GET_SERVER_LOGS = (
+    "Tail the trailing N lines from `cache/watchdog.log` and "
+    "`cache/jobs/worker-*.log`. Default 100 lines, max 1000.\n\n"
+    "Use when a job has failed silently or the server feels stuck — "
+    "the worker logs usually have a Python traceback. Synchronous, "
+    "filesystem-read only; never blocks on workers."
+)
+
 GENERATE_FCPXML = (
-    "Write three timeline files from one call: FCPXML 1.10 for Final "
-    "Cut, FCP 7 XMEML for Premiere, CMX 3600 EDL as a universal "
-    "fallback. All three share the same basename derived from "
-    "`output_path` (so `/cut.fcpxml` writes `cut.fcpxml`, `cut.xml`, "
-    "and `cut.edl` side by side). A-roll on V1, b-roll inserts on V2. "
-    "Synchronous.\n\n"
-    "Why three: Final Cut and Premiere have notoriously inconsistent "
-    "FCPXML support, and the v0.6.3 emitter produced output Final Cut "
-    "wouldn't validate. v0.6.4's FCPXML is now DTD-compliant; FCP 7 "
-    "XML is Premiere's most reliable import path; EDL works in every "
-    "NLE on Earth as a single-track fallback (b-roll is noted in "
-    "comments but not laid out on V2).\n\n"
-    "Call this LAST. The summary's `import_hints` field tells you "
-    "which file to point each NLE at."
+    "Write three timeline files + EDL relink sidecar from one call:\n"
+    "  - `<basename>.fcpxml` (Final Cut Pro 1.10)\n"
+    "  - `<basename>.xml`    (Premiere — FCP 7 XMEML v5)\n"
+    "  - `<basename>.edl`    (CMX 3600, universal V1 fallback)\n"
+    "  - `<basename>.relink.csv` (reel → source mapping for the EDL)\n\n"
+    "All four share the same basename derived from `output_path`. A-roll "
+    "is laid out contiguously on V1, b-roll inserts nest on V2. The "
+    "FCPXML is self-validated before the tool returns success — invalid "
+    "output is reported as `ok=False` with details, never silently shipped.\n\n"
+    "**SequenceSpec schema (v0.6.5 canonical names):**\n"
+    "```\n"
+    "{\n"
+    "  \"name\": \"my-cut\",\n"
+    "  \"fps\": 23.976, \"width\": 1920, \"height\": 1080,\n"
+    "  \"aroll\": [\n"
+    "    {\"source_path\": \"/abs/clip.mov\",\n"
+    "     \"source_in_sec\": 0.0, \"source_out_sec\": 5.0}\n"
+    "  ],\n"
+    "  \"broll\": [\n"
+    "    {\"source_path\": \"/abs/broll.mov\",\n"
+    "     \"source_in_sec\": 0.0, \"source_out_sec\": 2.0,\n"
+    "     \"timeline_offset_sec\": 1.5}\n"
+    "  ]\n"
+    "}\n"
+    "```\n"
+    "Pre-v0.6.5 names (`in_sec`/`out_sec` on a-roll, "
+    "`clip_in_sec`/`clip_out_sec`/`aroll_offset_sec` on b-roll) still "
+    "work via deprecation alias — both forms are accepted.\n\n"
+    "Reusing one source_path across multiple segments is the common "
+    "case for documentary cuts; the emitter dedupes to one `<asset>` "
+    "regardless of how many surface forms of the path you pass.\n\n"
+    "Call this LAST. The result's `data.import_hints` tells you which "
+    "file to point each NLE at; `edl_note` explains EDL reel relinking."
+)
+
+VALIDATE_FCPXML = (
+    "Re-validate an FCPXML file: well-formedness, ref/id resolution, "
+    "asset/<media-rep> presence, and (if xmllint is on PATH) external "
+    "DTD validation. Returns `ok=True` only if every check passed.\n\n"
+    "`generate_fcpxml` runs this internally before declaring success; "
+    "agents only need to call this explicitly when investigating an "
+    "FCP import error on a file they didn't just write."
 )
 
 EXTRACT_FRAME_GRID = (
     "Sample N frames from a video, tile them into a JPEG contact sheet, "
     "and return the image inline so you can vision-read it.\n\n"
-    "JPEG quality 75 keeps the inlined image well under Claude Desktop's "
-    "1 MB tool-result cap. Synchronous (~1s per clip)."
+    "v0.6.5 defaults: `num_frames=9`, `tile_size=256` (long edge in px), "
+    "`jpeg_quality=70`. These keep the inline image at ~600 KB so 9 "
+    "tiles stay under Claude Desktop's 1 MB tool-result cap. Bump "
+    "`tile_size` to 384/512 or `num_frames` to 16 if you need more "
+    "detail; either will eat into the byte budget. Synchronous (~1s per clip)."
 )
 
 GET_CLIP_THUMBNAIL = (
@@ -60,39 +112,56 @@ GET_CLIP_THUMBNAIL = (
 
 _ASYNC_NOTE = (
     "\n\n**This tool runs asynchronously.** It returns immediately "
-    "with `{job_id, status: 'started'}`. Poll `check_job_status(job_id)` "
-    "until `status` is `succeeded`, then read `result_summary` (and "
-    "`result_path` for the persisted full output).\n\n"
+    "with `{job_id, status: 'queued'|'started', queue_position}`. Poll "
+    "`check_job_status(job_id)` until `status` is `succeeded`, then "
+    "read `result_summary` (the rich dict) and `result_path` (the "
+    "persisted full output).\n\n"
     "Idempotent: re-calling with identical inputs returns the existing "
-    "succeeded job's result instantly — no work."
+    "succeeded job's result instantly — no work.\n\n"
+    "Concurrency: the worker pool is capped at `ROUGHCUT_WORKER_POOL_SIZE` "
+    "(default 4). Jobs beyond that sit in the queue with `queue_position` "
+    "indicating how many ahead; workers drain the queue strictly FIFO."
 )
 
 TRANSCRIBE_VIDEO = (
     "Transcribe one video file locally with mlx-whisper. Returns a "
     "job_id; on completion, `result_summary.transcript_path` is what "
     "the downstream tools (`cluster_takes_by_silence`, "
-    "`align_takes_to_script`, `diarize_speakers`, "
-    "`pick_angle_per_segment`) consume.\n\n"
-    "**Model defaults to `'small'`** (~480 MB, bundled in the .dxt — "
-    "zero-download first run, plenty accurate for clear-speaker "
-    "podcast / interview / scripted-VO content). Other choices: "
-    "`'medium'`, `'large-v3'` (best quality, ~3 GB, English-strong but "
-    "polyglot), `'large-v3-turbo'` (large-v3 quality at ~half the "
-    "size and ~2x speed). Power users can pass an `org/repo` HF id "
-    "directly.\n\n"
+    "`align_takes_to_script`, `summarize_clip`, `read_transcript`, "
+    "`search_transcripts`) consume.\n\n"
+    "**Model param table:**\n"
+    "  - `'tiny'`    — ~80 MB, fast, low accuracy. Quick draft.\n"
+    "  - `'base'`    — ~150 MB, modest accuracy. Casual transcripts.\n"
+    "  - `'small'`   — ~480 MB (BUNDLED in .dxt, zero-download). "
+    "Production-grade for clear-speaker interviews / VO. DEFAULT.\n"
+    "  - `'medium'`  — ~1.5 GB, better accuracy than small. Noisy audio.\n"
+    "  - `'large-v3'` — ~3 GB, best accuracy, multilingual.\n"
+    "  - `'large-v3-turbo'` — ~1.6 GB, large-v3 quality at 2× speed.\n"
+    "Power users can pass any `org/repo` HF id directly.\n\n"
+    "**Language param:** v0.6.5 defaults to `'en'` because Whisper "
+    "aggressively hallucinates languages on near-silent / low-speech "
+    "clips (real-world example: a near-silent drone clip got tagged "
+    "as Welsh). Pass `'auto'` to detect; pass an ISO 639-1 code to "
+    "force. When the model returns less than 5 segments and 50 chars on "
+    "a clip longer than 10s, the result includes "
+    "`low_speech_content: true` and a hint — don't try to source "
+    "dialogue from that clip.\n\n"
     "If the requested model isn't on disk, the job auto-downloads it "
     "as step 1 — `check_job_status` reports `current_step` so you can "
     "tell whether you're waiting on download or on transcription. To "
     "pre-fetch a bigger model without blocking transcription, call "
-    "`prewarm_model('large-v3')` separately.\n\n"
-    "Call on interview / podcast clips, not b-roll. Use "
-    "`language=\"auto\"` unless you know the code."
+    "`prewarm_model('large-v3')` separately FIRST when you know you'll "
+    "be batching across many clips.\n\n"
+    "Call on interview / podcast clips, not b-roll."
 ) + _ASYNC_NOTE
 
 CLUSTER_TAKES_BY_SILENCE = (
     "Group transcript segments into clusters separated by silence. "
     "Use this when there is NO script. Pass `transcript_path` from a "
-    "succeeded `transcribe_video` job."
+    "succeeded `transcribe_video` job.\n\n"
+    "v0.6.5: result includes `preview` — the top 3 clusters by duration "
+    "with their text excerpts inline, so the agent can decide which "
+    "cluster looks promising without reading the full JSON."
 ) + _ASYNC_NOTE
 
 ALIGN_TAKES_TO_SCRIPT = (
@@ -143,11 +212,12 @@ LIST_JOBS = (
     "List recent jobs in this cache dir. Use to recover context after "
     "starting a fresh chat: any earlier transcription / clustering / "
     "diarization that completed shows up here with its `result_path`.\n\n"
-    "Pagination (v0.6.4): `limit` defaults to 100, capped at 1000. "
-    "`offset` defaults to 0. The summary returns `total_count`, "
+    "**Pagination:** `limit` defaults to 100, capped at 1000. `offset` "
+    "defaults to 0. The result's `data` returns `total_count`, "
     "`returned_count`, and `next_offset` so you can page deterministically "
     "instead of guessing what got truncated. Optional `status` filter "
-    "(started/queued/running/succeeded/failed/cancelled/interrupted)."
+    "accepts started/queued/running/succeeded/failed/cancelled/interrupted.\n\n"
+    "Read-only filesystem call — never blocks on workers."
 )
 
 
@@ -178,14 +248,14 @@ RESUME_JOB = (
 
 READ_TRANSCRIPT = (
     "Page through a saved transcript JSON. Returns segments with "
-    "start/end timecodes, capped at `max_chars` so the result stays "
-    "under Desktop's 1 MB cap. Use this in documentary mode to "
-    "actually READ a clip after `transcribe_video` finishes — the "
-    "transcribe summary only gives you 200 chars.\n\n"
-    "`transcript_path` is what `transcribe_video` returns. "
-    "`start_segment` defaults to 0; on a long clip, follow up with "
-    "`start_segment=next_start` from the previous response to read "
-    "the rest. `has_more` tells you when you're done. Synchronous."
+    "start/end timecodes, capped at `max_chars` (default 900_000) so "
+    "the result stays under Desktop's 1 MB cap. Use in documentary "
+    "mode to actually READ a clip after `transcribe_video` finishes "
+    "— the transcribe summary only gives you 200 chars.\n\n"
+    "**Pagination:** `start_segment` defaults to 0. When the response's "
+    "`has_more` is true, call again with `start_segment=next_start` "
+    "to read the next page. `end_segment` is optional and lets you "
+    "scope a fixed window. Synchronous."
 )
 
 SEARCH_TRANSCRIPTS = (
@@ -208,6 +278,18 @@ SUMMARIZE_CLIP = (
     "of N transcripts in parallel, decide which clips look interesting, "
     "then `read_transcript` only those in full. Synchronous — no "
     "job_id, no polling."
+)
+
+LOOKUP_TRANSCRIPT_BY_VIDEO_PATH = (
+    "Given an absolute video path, find the cached transcript JSON "
+    "for that file (or report `found=False`). Saves the agent from "
+    "having to know the cache layout. Fast, filesystem-read only.\n\n"
+    "Use this at the start of a fresh chat session: pass the absolute "
+    "path of a clip the user mentions, and either get the transcript "
+    "back instantly OR get a hint to call `transcribe_video` first. "
+    "When multiple cached transcripts exist (different models), the "
+    "response returns all matches plus a `best_match` for the one "
+    "with the most segments."
 )
 
 PREWARM_MODEL = (

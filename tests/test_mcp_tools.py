@@ -120,6 +120,9 @@ def test_build_server_registers_expected_tools() -> None:
     assert "prewarm_model" in names
     # v0.6.4: self-heal
     assert "restart_workers" in names
+    # v0.6.5: validation + lookup + log tail
+    assert {"validate_fcpxml", "lookup_transcript_by_video_path",
+            "get_server_logs"}.issubset(names)
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:

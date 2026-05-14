@@ -234,6 +234,39 @@ def queue_depth(cache_dir: Path) -> int:
     return sum(1 for line in q.read_text(encoding="utf-8").splitlines() if line.strip())
 
 
+def queue_position(cache_dir: Path, job_id: str) -> int | None:
+    """1-indexed position of `job_id` in the queue, or None if not queued.
+
+    v0.6.5: agents get this back from `spawn()` so they can tell whether
+    a transcribe will start immediately or sit behind 30 others. None
+    means the job isn't in the queue — either already started, finished,
+    or never got there.
+    """
+    q = queue_path(cache_dir)
+    if not q.exists():
+        return None
+    for i, line in enumerate(q.read_text(encoding="utf-8").splitlines(), start=1):
+        if line.strip() == job_id:
+            return i
+    return None
+
+
+def live_worker_pids(cache_dir: Path) -> list[int]:
+    """Return pids of currently-alive workers in the configured pool."""
+    out: list[int] = []
+    for slot in range(pool_size()):
+        pid_file = _worker_pid_path(cache_dir, slot)
+        if not pid_file.exists():
+            continue
+        try:
+            pid = int(pid_file.read_text().strip())
+            if _alive(pid):
+                out.append(pid)
+        except (ValueError, OSError):
+            pass
+    return out
+
+
 def _ensure_workers(cache_dir: Path) -> list[int]:
     """Make sure the configured pool of workers is alive. Returns live pids.
 

@@ -25,7 +25,16 @@ from roughcut_core import jobs
 
 # After this many seconds with no jobs queued, the worker shuts down.
 # Re-spawn is cheap; sitting idle wastes a python process slot.
-IDLE_EXIT_SECONDS = 120
+#
+# v0.6.5 bumped this from 120 to 900: editorial sessions tend to have
+# minutes-long pauses between transcribes (the user reads the result,
+# decides what to do next). At 120s the worker exits during the pause,
+# and the next transcribe takes a cold-start hit re-spawning the
+# subprocess and re-loading mlx-whisper from disk. 15 minutes is long
+# enough to cover a thinking pause; long enough to be perceived as
+# "instant" by humans; short enough to free RAM if the user genuinely
+# moves on.
+IDLE_EXIT_SECONDS = float(os.environ.get("ROUGHCUT_WORKER_IDLE_SECONDS", "900"))
 
 # Active job id while a handler is running. SIGTERM uses this to flip
 # the currently-executing job to "cancelled" before the worker exits.
@@ -132,7 +141,13 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
     path = Path(args["video_path"]).resolve()
     requested_model = args.get("model") or models_catalog.DEFAULT_MODEL
     lang = args.get("language")
-    if lang and lang.lower() == "auto":
+    # v0.6.5 P3 #16: Whisper aggressively hallucinates languages on
+    # near-silent / low-speech clips (DG4A1666.MP4 was tagged Welsh in
+    # real shoots). Default to English unless the caller asks for auto.
+    # Pass "auto" explicitly to detect; pass an ISO code to force.
+    if lang is None or lang == "":
+        lang = "en"
+    elif lang.lower() == "auto":
         lang = None
 
     # Auto-prewarm: if the requested model isn't on disk yet, fetch it
@@ -152,12 +167,27 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
     if not transcript_path.exists():
         transcript_path.write_text(t.model_dump_json(), encoding="utf-8")
     full_text = " ".join(s.text.strip() for s in t.segments).strip()
+
+    # v0.6.5 P3 #16: detect the "Whisper saw silence and hallucinated"
+    # case. Heuristic: less than 5 segments AND less than 50 chars of
+    # speech text on a clip longer than 10 seconds. Don't blow up —
+    # the agent might still want to know — but flag it clearly so the
+    # cut-builder doesn't try to source bites from a clip that has none.
+    low_speech = (
+        t.duration > 10.0
+        and len(t.segments) < 5
+        and len(full_text) < 50
+    )
+
     summary = {
         "transcript_path": str(transcript_path),
+        "source_video": str(path),
         "segment_count": len(t.segments),
         "duration_sec": round(t.duration, 3),
         "language": t.language,
+        "language_requested": lang or "auto",
         "model": requested_model,
+        "low_speech_content": low_speech,
         "first_200_chars": full_text[:200],
         # Discoverability: chat-side Claude shouldn't have to stumble onto
         # the docs-mode tools by accident. Surface them in every transcribe
@@ -171,6 +201,12 @@ def _do_transcribe_video(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
              "what": "Case-insensitive substring search across every cached transcript."},
         ],
     }
+    if low_speech:
+        summary["hint"] = (
+            f"Clip is {t.duration:.1f}s but only {len(t.segments)} segments / "
+            f"{len(full_text)} chars of speech were detected. Likely b-roll, "
+            "ambience, or near-silence. Don't try to source dialogue from this clip."
+        )
     return transcript_path, summary
 
 
@@ -208,12 +244,34 @@ def _do_cluster(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
     clusters = takes.cluster_by_silence(t, threshold)
     key = cache_io.stable_key("clusters", str(transcript_path), threshold)
     out = cache_io.write_json(cache_dir, "clusters", key, [c.model_dump(mode="json") for c in clusters])
-    longest = max((len(c.segment_indices) for c in clusters), default=0)
+    longest_seg_count = max((len(c.segment_indices) for c in clusters), default=0)
+    longest_sec = max(
+        ((c.out_sec - c.in_sec) for c in clusters), default=0.0,
+    )
+    # v0.6.5 P2 #13: inline a few cluster previews so the agent doesn't
+    # have to read the whole JSON file to decide which cluster looks
+    # interesting. Keeps preview cheap (~3 clusters, text trimmed).
+    sorted_by_len = sorted(
+        clusters, key=lambda c: -(c.out_sec - c.in_sec),
+    )
+    preview = [
+        {
+            "cluster_id": c.cluster_id,
+            "start_sec": round(c.in_sec, 3),
+            "end_sec": round(c.out_sec, 3),
+            "duration_sec": round(c.out_sec - c.in_sec, 3),
+            "segment_count": len(c.segment_indices),
+            "text_excerpt": (c.text[:140] + "…") if len(c.text) > 140 else c.text,
+        }
+        for c in sorted_by_len[:3]
+    ]
     summary = {
         "clusters_path": str(out),
         "cluster_count": len(clusters),
-        "longest_cluster_segment_count": longest,
+        "longest_cluster_segment_count": longest_seg_count,
+        "longest_cluster_sec": round(longest_sec, 3),
         "total_duration_sec": round(sum(c.out_sec - c.in_sec for c in clusters), 3),
+        "preview": preview,
     }
     return out, summary
 
