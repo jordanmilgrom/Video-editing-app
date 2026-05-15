@@ -104,6 +104,28 @@ def validate_fcpxml(path: Path) -> dict[str, Any]:
             f"{assets_missing_media_rep[:5]} — FCP 1.10 DTD requires this"
         )
 
+    # v0.6.7 bug class: two <format> elements with identical attributes
+    # but different ids. FCP rejected v0.6.5/.6 output with "Invalid edit
+    # with no respective media" for every clip whose asset.format was a
+    # same-shape duplicate of the sequence format. Per the FCPXML
+    # convention, assets matching the sequence format must share its id.
+    fmt_signatures: dict[tuple[str, str, str], list[str]] = {}
+    for fmt in root.findall(".//resources/format"):
+        sig = (
+            fmt.attrib.get("width", ""),
+            fmt.attrib.get("height", ""),
+            fmt.attrib.get("frameDuration", ""),
+        )
+        fmt_signatures.setdefault(sig, []).append(fmt.attrib.get("id", "?"))
+    duplicate_fmts = {sig: ids for sig, ids in fmt_signatures.items() if len(ids) > 1}
+    if duplicate_fmts:
+        for sig, ids in duplicate_fmts.items():
+            errors.append(
+                f"duplicate <format> elements with same shape {sig} and "
+                f"different ids {ids} — FCP will silently fail to link "
+                f"asset-clips referencing the duplicate"
+            )
+
     # ----- 3. xmllint DTD validation (optional) -----------------------------
     xmllint = shutil.which("xmllint")
     if xmllint is None:
