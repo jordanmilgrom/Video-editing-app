@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "roughcut",
   "display_name": "roughcut — AI rough-cut assistant",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "First-draft video editor driven by your Claude agent. Bundles whisper-small for offline first-run transcription. Doc/interview and multicam podcast modes. Long-running work runs as background jobs that survive Claude Desktop restarts.",
   "long_description": "Point roughcut at a folder of interview footage and a folder of b-roll. The agent picks the cleanest takes, decides where b-roll fits, and writes a Premiere / DaVinci Resolve project file. roughcut does the deterministic work (transcribe, cluster takes, contact-sheet frames, build FCPXML); your Claude subscription pays for the reasoning. macOS Apple Silicon only.",
   "author": {

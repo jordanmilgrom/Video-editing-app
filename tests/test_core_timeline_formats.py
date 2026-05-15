@@ -123,9 +123,10 @@ def test_edl_emits_two_v1_edits(tmp_path: Path) -> None:
     body = out.read_text()
     assert body.startswith("TITLE: documentary-roughcut")
     assert "FCM: NON-DROP FRAME" in body
-    # Two A-roll edits → 001 and 002.
-    assert re.search(r"^001\s+AX\s+V\s+C", body, re.MULTILINE)
-    assert re.search(r"^002\s+AX\s+V\s+C", body, re.MULTILINE)
+    # Two A-roll edits → 001 and 002. v0.6.7: channels column is AA/V
+    # (video + audio chans 1+2), not bare V.
+    assert re.search(r"^001\s+AX\s+AA/V\s+C", body, re.MULTILINE)
+    assert re.search(r"^002\s+AX\s+AA/V\s+C", body, re.MULTILINE)
     # Source file comment.
     assert "* FROM CLIP NAME: interview.mp4" in body
 
@@ -135,7 +136,7 @@ def test_edl_program_timecode_starts_at_01_hours(tmp_path: Path) -> None:
     out = tmp_path / "cut.edl"
     edl.write_edl(_spec(tmp_path), out)
     body = out.read_text()
-    first_edit = re.search(r"^001\s+AX\s+V\s+C\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)",
+    first_edit = re.search(r"^001\s+AX\s+AA/V\s+C\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)",
                            body, re.MULTILINE)
     assert first_edit, body
     src_in, src_out, rec_in, rec_out = first_edit.groups()
@@ -193,3 +194,123 @@ def test_fcp7_pathurl_encodes_special_chars(tmp_path: Path) -> None:
     assert " " not in text, text
     assert "#" not in text, text
     assert "%20" in text and "%23" in text
+
+
+# ----- v0.6.7 P0: real-world regressions surfaced by Jordan's v3 cut -------
+
+
+def test_fcpxml_does_not_duplicate_sequence_format(tmp_path: Path) -> None:
+    """v0.6.7 P0 fix #1.
+
+    v0.6.5/v0.6.6 emitted a per-source <format sf1 …> with attributes
+    identical to the sequence <format r0 …>. Final Cut Pro rejected
+    every asset-clip referencing sf1 with "Invalid edit with no
+    respective media" — only the genuinely-different sf2 (4K B-roll)
+    clips imported. The fix: assets that match the sequence format
+    must REUSE r0, never get a duplicate id.
+    """
+    src = tmp_path / "interview.mp4"
+    src.touch()
+    spec = SequenceSpec(
+        name="dup-format-test", fps=23.976, width=1920, height=1080,
+        aroll=[ARollSegment(source_path=src, in_sec=0.0, out_sec=5.0)],
+    )
+    out = tmp_path / "cut.fcpxml"
+    fcpxml.write_fcpxml(spec, out)
+    root = ET.fromstring(out.read_text())
+
+    formats = root.findall("./resources/format")
+    # Without ffprobe (stub file), there's only r0; with ffprobe and a
+    # matching source, the asset should still use r0 — never sf1.
+    signatures = {
+        (f.attrib.get("width"), f.attrib.get("height"),
+         f.attrib.get("frameDuration"))
+        for f in formats
+    }
+    assert len(signatures) == len(formats), (
+        f"duplicate format signatures: {[f.attrib for f in formats]}"
+    )
+    # Asset must reference r0, not sf1 (sf1 doesn't exist).
+    asset = root.find("./resources/asset")
+    assert asset is not None
+    assert asset.attrib["format"] == "r0", (
+        f"asset format={asset.attrib['format']!r} — should reuse r0 since "
+        f"the asset's dimensions match the sequence"
+    )
+
+
+def test_fcpxml_assets_have_stable_uid(tmp_path: Path) -> None:
+    """v0.6.7: every asset carries a `uid` derived from its resolved
+    path. Re-emitting the same cut produces the same uids so FCP can
+    relink across imports."""
+    src = tmp_path / "interview.mp4"
+    src.touch()
+    spec = SequenceSpec(
+        aroll=[ARollSegment(source_path=src, in_sec=0.0, out_sec=5.0)],
+    )
+    out1 = tmp_path / "cut1.fcpxml"
+    out2 = tmp_path / "cut2.fcpxml"
+    fcpxml.write_fcpxml(spec, out1)
+    fcpxml.write_fcpxml(spec, out2)
+    uid1 = ET.fromstring(out1.read_text()).find("./resources/asset").attrib["uid"]
+    uid2 = ET.fromstring(out2.read_text()).find("./resources/asset").attrib["uid"]
+    assert uid1 == uid2 and len(uid1) == 32, f"uid not stable: {uid1!r} vs {uid2!r}"
+    assert uid1.isupper() and all(c in "0123456789ABCDEF" for c in uid1)
+
+
+def test_fcp7_xml_file_duration_covers_max_referenced_out(tmp_path: Path) -> None:
+    """v0.6.7 P0 fix #2.
+
+    v0.6.6 emitted the file's <duration> using the FIRST clipitem's
+    `out` value. Subsequent clipitems against the same file with a
+    higher `out` got rejected by Premiere with "File Import Failure"
+    (empty error). The fix pre-computes max out per file.
+    """
+    src = tmp_path / "interview.mp4"
+    src.touch()
+    spec = SequenceSpec(
+        fps=23.976,
+        aroll=[
+            ARollSegment(source_path=src, in_sec=0.0, out_sec=5.0),
+            ARollSegment(source_path=src, in_sec=100.0, out_sec=120.0),
+            ARollSegment(source_path=src, in_sec=50.0, out_sec=60.0),
+        ],
+    )
+    out = tmp_path / "cut.xml"
+    fcp7_xml.write_fcp7_xml(spec, out)
+    root = ET.fromstring(out.read_text())
+    file_dur_el = root.find(".//file/duration")
+    assert file_dur_el is not None and file_dur_el.text is not None
+    file_dur = int(file_dur_el.text)
+    # Every clipitem's `out` must fit within the declared file duration.
+    for clip in root.findall(".//clipitem"):
+        out_el = clip.find("out")
+        if out_el is not None and out_el.text:
+            assert int(out_el.text) <= file_dur, (
+                f"clipitem {clip.attrib.get('id')} out={out_el.text} > "
+                f"declared file duration {file_dur} — Premiere would reject"
+            )
+
+
+def test_edl_emits_video_plus_audio_channels(tmp_path: Path) -> None:
+    """v0.6.7 P0 fix #3.
+
+    v0.6.6 wrote bare `V` in the CMX 3600 channels column, so the
+    imported EDL was video-only. `AA/V` is the standard notation for
+    video + audio chans 1&2 — Resolve, Premiere, and Avid all
+    recognize it.
+    """
+    src = tmp_path / "interview.mp4"
+    src.touch()
+    spec = SequenceSpec(
+        name="audio-test", fps=23.976,
+        aroll=[ARollSegment(source_path=src, in_sec=0.0, out_sec=5.0)],
+    )
+    out = tmp_path / "cut.edl"
+    edl.write_edl(spec, out)
+    body = out.read_text()
+    assert re.search(r"^001\s+AX\s+AA/V\s+C", body, re.MULTILINE), (
+        f"EDL channels column is not AA/V — audio will be dropped on import:\n{body}"
+    )
+    # Bare ' V ' (the old form) would silently strip audio.
+    assert not re.search(r"^001\s+AX\s+V\s+C", body, re.MULTILINE)

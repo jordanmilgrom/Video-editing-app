@@ -69,8 +69,12 @@ def write_edl(spec: SequenceSpec, output_path: Path) -> dict:
         rec_in_tc = _seconds_to_tc(rec_cursor_sec, fps)
         rec_out_tc = _seconds_to_tc(rec_cursor_sec + dur, fps)
         reel = "AX"
+        # v0.6.7 P0: channels column "AA/V" means "video + audio chans 1&2"
+        # under the CMX 3600 standard. v0.6.6 emitted bare "V" which gave
+        # editors a video-only timeline with the dialog audio missing.
+        # AA/V is recognized by Resolve, Premiere, and Avid out of the box.
         lines.append(
-            f"{edit_no:03d}  {reel}       V     C        "
+            f"{edit_no:03d}  {reel}       AA/V  C        "
             f"{src_in_tc} {src_out_tc} {rec_in_tc} {rec_out_tc}"
         )
         lines.append(f"* FROM CLIP NAME: {Path(seg.source_path).name}")
@@ -79,6 +83,7 @@ def write_edl(spec: SequenceSpec, output_path: Path) -> dict:
         relink_rows.append({
             "edit_no": f"{edit_no:03d}",
             "reel": reel,
+            "channels": "AA/V",
             "clip_name": Path(seg.source_path).name,
             "source_path": str(Path(seg.source_path).resolve()),
             "src_in_tc": src_in_tc,
@@ -118,7 +123,7 @@ def write_edl(spec: SequenceSpec, output_path: Path) -> dict:
 
 
 def _write_relink_csv(path: Path, rows: list[dict[str, str]]) -> None:
-    fieldnames = ["edit_no", "reel", "clip_name", "source_path",
+    fieldnames = ["edit_no", "reel", "channels", "clip_name", "source_path",
                   "src_in_tc", "src_out_tc", "rec_in_tc", "rec_out_tc"]
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)

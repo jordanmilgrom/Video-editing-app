@@ -72,6 +72,23 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
             seen.add(k); paths.append(k)
     file_ids = {p: f"file-{i}" for i, p in enumerate(paths, start=1)}
 
+    # v0.6.7 P0: pre-compute the max referenced `out` per file so the
+    # first-reference <file><duration> is large enough to cover every
+    # later clipitem against the same source. Without this, Premiere
+    # rejects the XML with "File Import Failure" (empty error message)
+    # because subsequent clipitems point past the file's declared length.
+    file_max_out: dict[Path, int] = {}
+    for clip_idx, seg in enumerate(spec.aroll, start=1):
+        out_f = _frames(seg.out_sec, spec.fps)
+        key = aroll_keys[clip_idx - 1]
+        if out_f > file_max_out.get(key, 0):
+            file_max_out[key] = out_f
+    for clip_idx, ins in enumerate(spec.broll, start=1):
+        out_f = _frames(ins.clip_out_sec, spec.fps)
+        key = broll_keys[clip_idx - 1]
+        if out_f > file_max_out.get(key, 0):
+            file_max_out[key] = out_f
+
     # V1: A-roll spine. Files declared inline on the first reference;
     # subsequent references use <file id="..."/> empty form per the schema.
     v1 = ET.SubElement(video, "track")
@@ -83,7 +100,7 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
         dur_f = out_f - in_f
         _clipitem(
             v1, f"clipitem-a{clip_idx}", aroll_keys[clip_idx - 1],
-            file_ids, declared, spec.fps, timebase, ntsc,
+            file_ids, declared, file_max_out, spec.fps, timebase, ntsc,
             start=cursor, end=cursor + dur_f, in_=in_f, out=out_f,
         )
         cursor += dur_f
@@ -100,7 +117,7 @@ def write_fcp7_xml(spec: SequenceSpec, output_path: Path) -> None:
             offset_f = _frames(ins.aroll_offset_sec, spec.fps)
             _clipitem(
                 v2, f"clipitem-b{clip_idx}", broll_keys[clip_idx - 1],
-                file_ids, declared, spec.fps, timebase, ntsc,
+                file_ids, declared, file_max_out, spec.fps, timebase, ntsc,
                 start=offset_f, end=offset_f + dur_f, in_=in_f, out=out_f,
             )
 
@@ -149,6 +166,7 @@ def _format_block(parent: ET.Element, spec: SequenceSpec) -> None:
 def _clipitem(
     track: ET.Element, clip_id: str, source_key: Path,
     file_ids: dict[Path, str], declared: set[Path],
+    file_max_out: dict[Path, int],
     fps: float, timebase: int, ntsc: str,
     *, start: int, end: int, in_: int, out: int,
 ) -> None:
@@ -172,9 +190,12 @@ def _clipitem(
         # the Premiere-correct form. v0.6.5 P0 #2.
         ET.SubElement(file_el, "pathurl").text = source_key.as_uri()
         _rate_block(file_el, timebase, ntsc)
-        # Whole-file duration unknown without ffprobe; use the
-        # max-referenced out as a lower bound. Premiere relinks happily.
-        ET.SubElement(file_el, "duration").text = str(out)
+        # v0.6.7 P0: declare the MAX referenced out across every clipitem
+        # against this file. v0.6.6 declared just THIS clipitem's out,
+        # which Premiere rejected with "File Import Failure" (empty
+        # error) whenever a later clipitem referenced frames past the
+        # first declaration.
+        ET.SubElement(file_el, "duration").text = str(file_max_out[source_key])
 
 
 def _resolve_for_dedup(p: Path | str) -> Path:
