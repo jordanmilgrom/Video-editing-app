@@ -154,7 +154,14 @@ def _emit_assets(
     # the sequence values when ffprobe isn't on PATH or the source isn't
     # readable yet (e.g. unit tests that touch() a stub file).
     per_source = _per_source_format(paths, spec)
-    fmt_cache: dict[tuple[int, int, int, int], str] = {}
+    # v0.6.7 P0: if a probed source matches the sequence format exactly,
+    # REUSE r0 instead of allocating a duplicate sf{i}. Final Cut Pro
+    # rejected v0.6.5/.6 output with "Invalid edit with no respective
+    # media" for every clip whose asset format was a same-attributes
+    # duplicate of the sequence format — sharing the format id is the
+    # documented FCPXML pattern.
+    seq_fmt_key = (spec.width, spec.height, fps_num, fps_den)
+    fmt_cache: dict[tuple[int, int, int, int], str] = {seq_fmt_key: "r0"}
     next_fmt_id = 1
     # Asset ids use a separate `a{i}` namespace so they can never
     # collide with the `r0` sequence format or `sf{i}` per-source formats.
@@ -180,9 +187,14 @@ def _emit_assets(
                     "height": str(h),
                 })
         dur = _asset_duration(path, spec)
+        # Stable per-source uid lets FCP track this asset across imports
+        # / relinks even if the file gets moved. Uppercase hex matches
+        # FCP's own internal id convention.
+        uid = _asset_uid(path)
         asset = ET.SubElement(resources, "asset", {
             "id": aid,
             "name": path.stem,
+            "uid": uid,
             "start": "0s",
             "duration": _t(dur, fps_num, fps_den),
             "hasVideo": "1",
@@ -201,6 +213,17 @@ def _emit_assets(
             "src": Path(path).as_uri(),
         })
     return asset_ids, source_for_aroll, source_for_broll
+
+
+def _asset_uid(path: Path) -> str:
+    """Stable 32-char uppercase hex uid derived from the resolved path.
+
+    FCP uses uppercase-hex strings as internal asset identifiers (see
+    Apple's FCPXML guide). Deriving from the path means re-emitting the
+    cut later produces the same uid — FCP can relink without confusion.
+    """
+    import hashlib
+    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:32].upper()
 
 
 def _resolve_for_dedup(p: Path | str) -> Path:
