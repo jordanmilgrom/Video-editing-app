@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roughcut"
-version = "0.6.5.1"
+version = "0.6.6"
 description = "MCP-first rough-cut tool: deterministic video capabilities for agent-driven editing."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -24,6 +24,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
+    "packaging>=23.0",
 ]
 
 [project.scripts]
