@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from roughcut_mcp import tools
+from tests.conftest import requires_ffmpeg
 
 
 def _spec_dict(tmp_path: Path) -> dict:
@@ -73,3 +75,33 @@ def test_generate_fcpxml_writes_and_returns_summary(tmp_path: Path) -> None:
     root = ET.fromstring(text[text.index("<fcpxml"):])
     nested = root.findall("./library/event/project/sequence/spine/asset-clip/asset-clip[@lane='1']")
     assert len(nested) == 1
+
+
+@requires_ffmpeg
+def test_generate_fcpxml_rejects_source_out_past_file_duration(tmp_path: Path) -> None:
+    """v0.7.0 P0: every source is ffprobed; specs that request time past
+    the file's actual duration are rejected with a per-segment error
+    list — never silently shipped to FCP / Premiere as media-not-found.
+    """
+    short_clip = tmp_path / "short.mp4"
+    # 1.0s of test source.
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=duration=1:size=160x90:rate=24",
+         "-pix_fmt", "yuv420p", str(short_clip)],
+        check=True,
+    )
+    spec = {
+        "name": "stretched-clip-test", "fps": 23.976,
+        "width": 1920, "height": 1080,
+        # Lie about how long the clip is — request 5s of media from a 1s file.
+        "aroll": [{"source_path": str(short_clip),
+                   "in_sec": 0.0, "out_sec": 5.0}],
+    }
+    res = tools._generate_fcpxml(spec, str(tmp_path / "out.fcpxml"))
+    assert res.ok is False
+    assert res.error == "invalid_spec"
+    assert "source_out_sec" in (res.message or "")
+    assert (res.data or {}).get("bounds_errors")
+    # Output files must NOT have been written.
+    assert not (tmp_path / "out.fcpxml").exists()

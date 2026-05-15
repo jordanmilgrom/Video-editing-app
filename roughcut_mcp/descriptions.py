@@ -80,6 +80,19 @@ GENERATE_FCPXML = (
     "Reusing one source_path across multiple segments is the common "
     "case for documentary cuts; the emitter dedupes to one `<asset>` "
     "regardless of how many surface forms of the path you pass.\n\n"
+    "**Editorial pre-flight (v0.7.0):** before calling this, you "
+    "should have already:\n"
+    "  - Called `find_silences(start_sec, end_sec)` for each long "
+    "A-roll take and split it into multiple ARollSegments around the "
+    "interior pauses. Otherwise the cut will be full of dead air.\n"
+    "  - Called `analyze_motion(video_path)` for each candidate b-roll "
+    "source and chosen `source_in/out_sec` only inside `stable_spans` "
+    "(static or slow_pan). Otherwise you'll insert cameraman-searching "
+    "panning footage.\n\n"
+    "**Bounds validation:** every unique source is ffprobed; the call "
+    "returns `ok=False` with a per-segment `bounds_errors` list if any "
+    "ARollSegment / BRollInsert specifies `source_out_sec` past the "
+    "actual file duration. Don't lie about clip lengths.\n\n"
     "Call this LAST. The result's `data.import_hints` tells you which "
     "file to point each NLE at; `edl_note` explains EDL reel relinking."
 )
@@ -100,7 +113,12 @@ EXTRACT_FRAME_GRID = (
     "`jpeg_quality=70`. These keep the inline image at ~600 KB so 9 "
     "tiles stay under Claude Desktop's 1 MB tool-result cap. Bump "
     "`tile_size` to 384/512 or `num_frames` to 16 if you need more "
-    "detail; either will eat into the byte budget. Synchronous (~1s per clip)."
+    "detail; either will eat into the byte budget. Synchronous (~1s per clip).\n\n"
+    "**For b-roll triage in v0.7.0+, call `analyze_motion` BEFORE this** — "
+    "the contact sheet shows you what's IN the clip but not where it's "
+    "framing-stable. analyze_motion returns the precise spans you should "
+    "pick from. Use the contact sheet to see CONTENT (subject, framing); "
+    "use analyze_motion to see WHERE that content is held still."
 )
 
 GET_CLIP_THUMBNAIL = (
@@ -278,6 +296,39 @@ SUMMARIZE_CLIP = (
     "of N transcripts in parallel, decide which clips look interesting, "
     "then `read_transcript` only those in full. Synchronous — no "
     "job_id, no polling."
+)
+
+FIND_SILENCES = (
+    "Return silence ranges and tight speech sub-segments inside a "
+    "specific time window of a transcript. Use this AFTER picking a "
+    "long take, BEFORE adding it to a SequenceSpec — drop the raw "
+    "take and instead add multiple ARollSegments built from "
+    "`speech_sub_segments`. Otherwise the cut will include 30 seconds "
+    "of dead air just because they fell inside the chosen take.\n\n"
+    "Pure transcript analysis, no audio probing. `min_silence_sec` "
+    "defaults to 0.5s — bump to 1.0s for slow-paced interviews, drop "
+    "to 0.3s to chase every micro-pause. Returns `silences` (head / "
+    "interior / tail tagged), `speech_sub_segments` (the tight inverse "
+    "ranges, each ≥0.3s), `total_silence_sec`, and a "
+    "`tightened_duration_sec` so you can see the time saved before "
+    "committing. Synchronous, milliseconds."
+)
+
+ANALYZE_MOTION = (
+    "Frame-diff a video clip (sampled at `sample_hz` Hz, default 2) "
+    "and return spans tagged static / slow_pan / fast_pan / cut. "
+    "Always call this BEFORE picking b-roll source_in/out_sec ranges "
+    "— otherwise you'll silently choose spans where the cameraman "
+    "was searching for the subject (panning back and forth) or that "
+    "straddle a shot boundary, both of which look like garbage on the "
+    "timeline.\n\n"
+    "Pipeline: ffmpeg samples at `sample_hz` Hz, downsamples to 64×36 "
+    "grayscale, numpy computes mean-abs-pixel-diff between consecutive "
+    "frames, thresholds bucket each interval. The response includes "
+    "`stable_spans` (static + slow_pan, ≥2s) — those are the spans "
+    "you should pick from. Synchronous, ~1–3s per minute of source.\n\n"
+    "Bump `sample_hz` to 4 for fast-paced footage where 0.5s temporal "
+    "resolution misses cuts."
 )
 
 LOOKUP_TRANSCRIPT_BY_VIDEO_PATH = (

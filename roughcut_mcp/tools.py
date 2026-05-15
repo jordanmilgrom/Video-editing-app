@@ -38,7 +38,7 @@ from mcp.types import TextContent
 
 from roughcut_core import (
     broll, cache_io, clips, documentary, edl, fcp7_xml, fcpxml,
-    fcpxml_validate, jobs, models_catalog, system_status, transcribe,
+    fcpxml_validate, jobs, models_catalog, motion, system_status, transcribe,
 )
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
@@ -124,6 +124,17 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.LOOKUP_TRANSCRIPT_BY_VIDEO_PATH)
     def lookup_transcript_by_video_path(video_path: str) -> ToolResponse:
         return _lookup_transcript_by_video_path(video_path)
+
+    @mcp.tool(description=desc.FIND_SILENCES)
+    def find_silences(
+        transcript_path: str, start_sec: float, end_sec: float,
+        min_silence_sec: float = 0.5,
+    ) -> ToolResponse:
+        return _find_silences(transcript_path, start_sec, end_sec, min_silence_sec)
+
+    @mcp.tool(description=desc.ANALYZE_MOTION)
+    def analyze_motion(video_path: str, sample_hz: float = 2.0) -> ToolResponse:
+        return _analyze_motion(video_path, sample_hz)
 
     # ----- Async-job tools (return job_id, work in subprocess) ---------------
 
@@ -421,6 +432,23 @@ def _generate_fcpxml(sequence_spec_data: dict, output_path: str) -> ToolResponse
     if not spec.aroll:
         return ToolResponse(ok=False, error="invalid_spec",
                             message="SequenceSpec.aroll is empty")
+
+    # v0.7.0 P0: ffprobe each unique source and reject specs where any
+    # segment requests time past the file's actual duration. Without
+    # this, the agent can specify source_out_sec=5.0 for a 1.2s file
+    # and FCP imports a clip that "plays" 5s but only has 1.2s of
+    # media — the rest is missing-media frames.
+    bounds_errors = _validate_source_bounds(spec)
+    if bounds_errors:
+        return ToolResponse(
+            ok=False, error="invalid_spec",
+            message=("SequenceSpec references time past actual file durations: "
+                     + "; ".join(bounds_errors[:5])
+                     + (f" (+{len(bounds_errors) - 5} more)"
+                        if len(bounds_errors) > 5 else "")),
+            data={"bounds_errors": bounds_errors},
+        )
+
     fcpxml_path = out.with_suffix(".fcpxml")
     fcp7_path = out.with_suffix(".xml")
     edl_path = out.with_suffix(".edl")
@@ -680,3 +708,94 @@ def _lookup_transcript_by_video_path(video_path: str) -> ToolResponse:
         }
     return ToolResponse(ok=bool(result.get("found")), data=result,
                         next_steps=next_steps)
+
+
+def _validate_source_bounds(spec: SequenceSpec) -> list[str]:
+    """ffprobe each unique source; return errors for out-of-range segments.
+
+    Skips silently if ffprobe is unavailable (e.g. in unit tests with
+    stub files that aren't real video). The other validation layers
+    catch missing files; this one is purely about source-time bounds.
+    """
+    sources_to_check: set[Path] = set()
+    for seg in spec.aroll:
+        sources_to_check.add(fcpxml._resolve_for_dedup(seg.source_path))
+    for ins in spec.broll:
+        sources_to_check.add(fcpxml._resolve_for_dedup(ins.source_path))
+
+    durations: dict[Path, float] = {}
+    for path in sources_to_check:
+        try:
+            meta = clips.probe_clip(path)
+        except Exception:  # noqa: BLE001  ffprobe unavailable / file unreadable
+            continue
+        if meta.duration_sec > 0:
+            durations[path] = meta.duration_sec
+
+    # 50 ms slack to forgive frame-rate rounding (e.g. agent says 5.000s,
+    # actual file is 4.987s — both round to 120 frames at 24fps).
+    SLACK = 0.05
+    errors: list[str] = []
+    for i, seg in enumerate(spec.aroll):
+        key = fcpxml._resolve_for_dedup(seg.source_path)
+        dur = durations.get(key)
+        if dur is not None and seg.source_out_sec > dur + SLACK:
+            errors.append(
+                f"aroll[{i}] {Path(seg.source_path).name}: "
+                f"source_out_sec={seg.source_out_sec:.2f}s but the file "
+                f"is only {dur:.2f}s long"
+            )
+    for i, ins in enumerate(spec.broll):
+        key = fcpxml._resolve_for_dedup(ins.source_path)
+        dur = durations.get(key)
+        if dur is not None and ins.source_out_sec > dur + SLACK:
+            errors.append(
+                f"broll[{i}] {Path(ins.source_path).name}: "
+                f"source_out_sec={ins.source_out_sec:.2f}s but the file "
+                f"is only {dur:.2f}s long"
+            )
+    return errors
+
+
+def _find_silences(
+    transcript_path: str, start_sec: float, end_sec: float, min_silence_sec: float,
+) -> ToolResponse:
+    p = abs_file(transcript_path)
+    if isinstance(p, ToolResponse):
+        return p
+    if end_sec <= start_sec:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"end_sec ({end_sec}) must be > start_sec ({start_sec})")
+    try:
+        result = documentary.find_silences(p, start_sec, end_sec, min_silence_sec)
+    except Exception as e:  # noqa: BLE001
+        log.exception("find_silences failed")
+        return to_error(e)
+    next_steps = {
+        "build_tight_spec": (
+            "Use the speech_sub_segments list to build multiple ARollSegments "
+            "instead of one long take with embedded silence."
+        ),
+    } if result["silences"] else None
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
+
+
+def _analyze_motion(video_path: str, sample_hz: float) -> ToolResponse:
+    p = abs_file(video_path)
+    if isinstance(p, ToolResponse):
+        return p
+    if not (0.5 <= sample_hz <= 10.0):
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"sample_hz must be in [0.5, 10.0], got {sample_hz}")
+    try:
+        result = motion.analyze_motion(p, sample_hz=sample_hz)
+    except Exception as e:  # noqa: BLE001
+        log.exception("analyze_motion failed")
+        return to_error(e)
+    next_steps = {
+        "pick_stable_range": (
+            "Choose b-roll source_in/out_sec inside one of `stable_spans` "
+            "(static or slow_pan, >=2s). Avoid fast_pan and don't span cuts."
+        ),
+    } if result.get("stable_spans") else None
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
