@@ -175,6 +175,100 @@ def lookup_transcript_by_video_path(video_path: Path, cache_dir: Path) -> dict:
     }
 
 
+def find_silences(
+    transcript_path: Path,
+    start_sec: float,
+    end_sec: float,
+    min_silence_sec: float = 0.5,
+) -> dict:
+    """Return silence ranges and tight speech sub-segments inside a take.
+
+    v0.7.0 P0: a documentary cut shouldn't include 30 seconds of "uhh"
+    pauses just because they fell inside the chosen take. Call this on
+    every long aroll segment, then build sub-segments around the
+    silences instead of using the raw range.
+
+    Pure transcript analysis — no audio probing. We treat the gap
+    between consecutive transcript segments as silence; gaps >=
+    `min_silence_sec` are returned. The leading gap (start_sec to
+    first segment) and trailing gap (last segment to end_sec) are
+    tagged as `head` / `tail` silences.
+
+    `speech_sub_segments` is the inverse: the spans inside [start_sec,
+    end_sec] that contain speech with no big pauses. Each sub-segment
+    is at least 0.3s long. Drop these into a SequenceSpec as multiple
+    ARollSegments to get a tight cut.
+    """
+    t = Transcript.model_validate_json(
+        Path(transcript_path).read_text(encoding="utf-8")
+    )
+    segs = [s for s in t.segments if s.end > start_sec and s.start < end_sec]
+    silences: list[dict] = []
+
+    if segs:
+        head_gap = segs[0].start - start_sec
+        if head_gap >= min_silence_sec:
+            silences.append({
+                "start_sec": round(start_sec, 3),
+                "end_sec": round(segs[0].start, 3),
+                "duration_sec": round(head_gap, 3),
+                "kind": "head",
+            })
+        for i in range(len(segs) - 1):
+            gap_start = segs[i].end
+            gap_end = segs[i + 1].start
+            if gap_end - gap_start >= min_silence_sec:
+                silences.append({
+                    "start_sec": round(gap_start, 3),
+                    "end_sec": round(gap_end, 3),
+                    "duration_sec": round(gap_end - gap_start, 3),
+                    "kind": "interior",
+                })
+        tail_gap = end_sec - segs[-1].end
+        if tail_gap >= min_silence_sec:
+            silences.append({
+                "start_sec": round(segs[-1].end, 3),
+                "end_sec": round(end_sec, 3),
+                "duration_sec": round(tail_gap, 3),
+                "kind": "tail",
+            })
+
+    # Inverse: speech-only sub-segments. Drop sub-segments shorter than
+    # 0.3s — too short to bother editing.
+    sub_segments: list[dict] = []
+    cursor = start_sec
+    for sil in silences:
+        if sil["start_sec"] > cursor + 0.3:
+            sub_segments.append({
+                "source_in_sec": round(cursor, 3),
+                "source_out_sec": round(sil["start_sec"], 3),
+                "duration_sec": round(sil["start_sec"] - cursor, 3),
+            })
+        cursor = sil["end_sec"]
+    if end_sec > cursor + 0.3:
+        sub_segments.append({
+            "source_in_sec": round(cursor, 3),
+            "source_out_sec": round(end_sec, 3),
+            "duration_sec": round(end_sec - cursor, 3),
+        })
+
+    return {
+        "transcript_path": str(transcript_path),
+        "source_video": str(t.source_path),
+        "range": [round(start_sec, 3), round(end_sec, 3)],
+        "min_silence_sec": min_silence_sec,
+        "silences": silences,
+        "speech_sub_segments": sub_segments,
+        "total_silence_sec": round(
+            sum(s["duration_sec"] for s in silences), 3
+        ),
+        "tightened_duration_sec": round(
+            sum(s["duration_sec"] for s in sub_segments), 3
+        ),
+        "original_duration_sec": round(end_sec - start_sec, 3),
+    }
+
+
 def summarize_clip(transcript_path: Path) -> dict:
     """Deterministic per-clip snippet view — no LLM call.
 

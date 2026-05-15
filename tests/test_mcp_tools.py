@@ -123,6 +123,8 @@ def test_build_server_registers_expected_tools() -> None:
     # v0.6.5: validation + lookup + log tail
     assert {"validate_fcpxml", "lookup_transcript_by_video_path",
             "get_server_logs"}.issubset(names)
+    # v0.7.0: editorial intelligence — silence-finding + motion analysis
+    assert {"find_silences", "analyze_motion"}.issubset(names)
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:
