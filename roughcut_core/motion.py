@@ -15,7 +15,7 @@ module turns that guess into a deterministic check.
 Pipeline:
 
   ffmpeg -i input.mp4 -vf "fps=2,scale=64:36,format=gray" -f rawvideo -
-            \--------- 2 Hz, 64x36, single-channel gray ---------/
+            \\--------- 2 Hz, 64x36, single-channel gray ---------/
   → 2304 bytes per frame
   → numpy reshape, np.abs(diff).mean() per consecutive pair
   → bucket motion scores into labels
@@ -58,11 +58,17 @@ def analyze_motion(video_path: Path, sample_hz: float = 2.0) -> dict:
     for "is this span stable" decisions. Bump to 4 Hz for tighter cut
     detection on fast-paced footage.
     """
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("ffmpeg not found on PATH")
+    # v0.7.1: check file existence BEFORE ffmpeg presence. The file
+    # check is deterministic and cheap; raising RuntimeError("ffmpeg
+    # not found") for a missing file is the wrong error and broke the
+    # v0.7.0 CI test (which asserts FileNotFoundError on a path that
+    # doesn't exist, but the ubuntu runner has no ffmpeg so the wrong
+    # check fired first).
     video_path = Path(video_path)
     if not video_path.is_file():
         raise FileNotFoundError(video_path)
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found on PATH")
 
     raw = _extract_gray_stream(video_path, sample_hz)
     n_frames = len(raw) // FRAME_BYTES
