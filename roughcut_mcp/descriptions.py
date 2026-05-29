@@ -405,6 +405,73 @@ ADD_HANDLES_TO_SPEC = (
     "the audience sees. Synchronous."
 )
 
+FIND_AUDIO_SILENCES = (
+    "Detect silences by examining the actual audio waveform. ffmpeg "
+    "decodes the audio to mono 16 kHz PCM; numpy computes per-50ms RMS "
+    "envelope in dBFS; spans below `threshold_db` longer than "
+    "`min_silence_sec` are returned.\n\n"
+    "This is the audio-side complement to `find_silences` (which is "
+    "transcript-gap based). Use both: `find_silences` catches gaps "
+    "BETWEEN Whisper segments; `find_audio_silences` catches gaps "
+    "INSIDE a segment that Whisper merged through. Typically the second "
+    "tool finds 2-5x more silence than the first on real interview "
+    "footage.\n\n"
+    "Defaults: `min_silence_sec=0.3`, `threshold_db=-40` (typical clean "
+    "room tone floor). For noisy field audio bump threshold to -30. "
+    "Returns `silences` (list), `total_silence_sec`, `silence_pct`. "
+    "Synchronous, ~1-3s per minute of source."
+)
+
+DETECT_BREATHS = (
+    "Find breaths / lip smacks / inhales between transcribed words: short "
+    "(<800ms) low-energy spans that aren't quite silence but aren't speech. "
+    "Common between sentences and at the start of takes; cutting them "
+    "tightens the pace without removing any words.\n\n"
+    "Heuristic: spans BETWEEN two consecutive Whisper Word entries with "
+    "duration in [0.15s, 0.8s] and mean RMS strictly between the silence "
+    "floor (-55 dBFS) and the speech floor (-30 dBFS). Skips segments "
+    "without per-word stamps.\n\n"
+    "Pair with `find_audio_silences` for full waveform coverage. Or just "
+    "call `tighten_take`, which runs all the detectors at once. "
+    "Synchronous, ~1-3s per minute of source (one ffmpeg decode)."
+)
+
+DETECT_FALSE_STARTS = (
+    "Find interview false starts: 'I- I-I think' / 'the the' / 'well, well'. "
+    "Common in real-world interview footage. Whisper transcribes the words "
+    "faithfully; this tool surfaces the candidates so the editor cuts the "
+    "first attempt(s) and keeps the last clean utterance.\n\n"
+    "Pure word-stream pattern matching, no audio. Detects:\n"
+    "  1. Single-word repeat ('I I think') — first 'I' is the skip.\n"
+    "  2. Stutter (3+ identical) — first N-1 are the skip.\n"
+    "  3. 2-word phrase repeat ('the thing the thing is').\n\n"
+    "Each hit reports `kept_at_sec` (the surviving utterance's start time) "
+    "and a `skip` range covering everything before it. Synchronous, "
+    "milliseconds."
+)
+
+TIGHTEN_TAKE = (
+    "**The fused editorial-tightening pass.** Run every applicable "
+    "detector with ONE audio decode and return ONE merged list of "
+    "speech-only sub-segments. The agent doesn't need to call "
+    "find_silences + find_audio_silences + detect_fillers + detect_breaths "
+    "+ detect_false_starts separately and do merge math — this tool does "
+    "all of it.\n\n"
+    "Input: `video_path` + `transcript_path` + the source-clip range you "
+    "were about to drop into an ARollSegment as-is.\n\n"
+    "Output: `tight_segments` (drop-in `source_in_sec`/`source_out_sec` "
+    "ranges for multiple ARollSegments), `skipped_ranges` (what was cut "
+    "and why — each range is tagged with its `sources`), and `stats` "
+    "(`time_saved_pct`, per-detector breakdown).\n\n"
+    "This is the tool the agent should call BY DEFAULT for every long "
+    "A-roll take, replacing the find_silences-only flow from v0.7. "
+    "Synchronous, ~1-3s per minute of source.\n\n"
+    "Iteration knobs: `min_silence_sec` (lower = more aggressive), "
+    "`silence_threshold_db` (-40 default, -30 for noisy field audio), "
+    "`min_segment_sec` (0.4 default, bump if cut feels choppy). The three "
+    "`include_*` flags let you turn individual detectors off."
+)
+
 LOOKUP_TRANSCRIPT_BY_VIDEO_PATH = (
     "Given an absolute video path, find the cached transcript JSON "
     "for that file (or report `found=False`). Saves the agent from "
