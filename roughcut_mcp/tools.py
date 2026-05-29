@@ -37,8 +37,9 @@ from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import TextContent
 
 from roughcut_core import (
-    broll, cache_io, clips, documentary, edl, fcp7_xml, fcpxml,
-    fcpxml_validate, jobs, models_catalog, motion, system_status, transcribe,
+    broll, cache_io, captions, clips, documentary, edl, fcp7_xml, fcpxml,
+    fcpxml_validate, fillers, handles, jobs, models_catalog, motion,
+    preview, system_status, transcribe,
 )
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
@@ -135,6 +136,40 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.ANALYZE_MOTION)
     def analyze_motion(video_path: str, sample_hz: float = 2.0) -> ToolResponse:
         return _analyze_motion(video_path, sample_hz)
+
+    # ----- v0.8.0: editorial intelligence II --------------------------------
+
+    @mcp.tool(description=desc.DETECT_FILLERS)
+    def detect_fillers(
+        transcript_path: str,
+        start_sec: float | None = None,
+        end_sec: float | None = None,
+        patterns: list[str] | None = None,
+    ) -> ToolResponse:
+        return _detect_fillers(transcript_path, start_sec, end_sec, patterns)
+
+    @mcp.tool(description=desc.DESCRIBE_CLIP)
+    def describe_clip(
+        video_path: str, description: str,
+        tags: list[str] | None = None, mood: str | None = None,
+    ) -> ToolResponse:
+        return _describe_clip(video_path, description, tags, mood)
+
+    @mcp.tool(description=desc.SEARCH_BROLL)
+    def search_broll(
+        query: str, folder_path: str | None = None, max_results: int = 10,
+    ) -> ToolResponse:
+        return _search_broll(query, folder_path, max_results)
+
+    @mcp.tool(description=desc.RENDER_PREVIEW)
+    def render_preview(sequence_spec: dict, output_path: str) -> ToolResponse:
+        return _render_preview(sequence_spec, output_path)
+
+    @mcp.tool(description=desc.ADD_HANDLES_TO_SPEC)
+    def add_handles_to_spec(
+        sequence_spec: dict, handle_sec: float = 0.5,
+    ) -> ToolResponse:
+        return _add_handles_to_spec(sequence_spec, handle_sec)
 
     # ----- Async-job tools (return job_id, work in subprocess) ---------------
 
@@ -799,3 +834,149 @@ def _analyze_motion(video_path: str, sample_hz: float) -> ToolResponse:
         ),
     } if result.get("stable_spans") else None
     return ToolResponse(ok=True, data=result, next_steps=next_steps)
+
+
+# ----- v0.8.0 implementations ------------------------------------------
+
+
+def _detect_fillers(
+    transcript_path: str,
+    start_sec: float | None,
+    end_sec: float | None,
+    patterns: list[str] | None,
+) -> ToolResponse:
+    p = abs_file(transcript_path)
+    if isinstance(p, ToolResponse):
+        return p
+    if start_sec is not None and end_sec is not None and end_sec <= start_sec:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"end_sec ({end_sec}) must be > start_sec ({start_sec})")
+    try:
+        result = fillers.detect_fillers(
+            p,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            patterns=tuple(patterns) if patterns else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("detect_fillers failed")
+        return to_error(e)
+    next_steps = None
+    if result["filler_ranges"]:
+        next_steps = {
+            "build_tight_spec": (
+                "Treat filler_ranges as additional silence spans when assembling "
+                "ARollSegments. Merge with the output of find_silences for a "
+                "single tight speech-only sub-segment list."
+            ),
+        }
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
+
+
+def _describe_clip(
+    video_path: str, description: str,
+    tags: list[str] | None, mood: str | None,
+) -> ToolResponse:
+    p = abs_file(video_path)
+    if isinstance(p, ToolResponse):
+        return p
+    if not description or not description.strip():
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message="description must be non-empty")
+    try:
+        record = captions.write_caption(
+            p, cache_dir(None), description, tags=tags, mood=mood,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("describe_clip failed")
+        return to_error(e)
+    return ToolResponse(ok=True, data=record, next_steps={
+        "search_now": f"search_broll(query='<keyword from description>')",
+    })
+
+
+def _search_broll(
+    query: str, folder_path: str | None, max_results: int,
+) -> ToolResponse:
+    folder: Path | None = None
+    if folder_path:
+        folder_resolved = abs_dir(folder_path)
+        if isinstance(folder_resolved, ToolResponse):
+            return folder_resolved
+        folder = folder_resolved
+    capped = max(1, min(100, int(max_results or 10)))
+    try:
+        result = captions.search_captions(
+            query, cache_dir(None), folder_path=folder, max_results=capped,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("search_broll failed")
+        return to_error(e)
+    next_steps = None
+    if result["result_count"] == 0:
+        next_steps = {
+            "caption_more": (
+                "No matches. The cache may be empty for this query. Run "
+                "extract_frame_grid + describe_clip on candidate b-roll first."
+            ),
+        }
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
+
+
+def _render_preview(sequence_spec_data: dict, output_path: str) -> ToolResponse:
+    out = abs_path(output_path)
+    if isinstance(out, ToolResponse):
+        return out
+    try:
+        spec = SequenceSpec.model_validate(sequence_spec_data)
+    except Exception as e:  # noqa: BLE001
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"SequenceSpec invalid: {e}")
+    if not spec.aroll:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message="SequenceSpec.aroll is empty")
+    try:
+        result = preview.render_preview(spec, out)
+    except FileNotFoundError as e:
+        return ToolResponse(ok=False, error="not_a_file",
+                            message=f"source file not found: {e}")
+    except Exception as e:  # noqa: BLE001
+        log.exception("render_preview failed")
+        return to_error(e)
+    return ToolResponse(ok=True, output_path=result["preview_path"],
+                        data=result, next_steps={
+        "vision_qc": (
+            "Read the preview MP4 to QC pacing, dead air, and overall feel "
+            "before calling generate_fcpxml on the same spec."
+        ),
+        "ship_it": f"generate_fcpxml(sequence_spec=<same spec>, output_path='<abs>')",
+    })
+
+
+def _add_handles_to_spec(
+    sequence_spec_data: dict, handle_sec: float,
+) -> ToolResponse:
+    try:
+        spec = SequenceSpec.model_validate(sequence_spec_data)
+    except Exception as e:  # noqa: BLE001
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"SequenceSpec invalid: {e}")
+    if handle_sec < 0:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"handle_sec must be >= 0, got {handle_sec}")
+    try:
+        padded = handles.add_handles_to_spec(spec, handle_sec=handle_sec)
+    except Exception as e:  # noqa: BLE001
+        log.exception("add_handles_to_spec failed")
+        return to_error(e)
+    return ToolResponse(ok=True, data={
+        "sequence_spec": padded.model_dump(mode="json"),
+        "handle_sec": handle_sec,
+        "aroll_count": len(padded.aroll),
+        "broll_count": len(padded.broll),
+    }, next_steps={
+        "ship_it": (
+            "Pass the returned sequence_spec to generate_fcpxml. The cut "
+            "plays the same; editors now have head/tail handles in the NLE."
+        ),
+    })
