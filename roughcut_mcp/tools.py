@@ -37,9 +37,9 @@ from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import TextContent
 
 from roughcut_core import (
-    broll, cache_io, captions, clips, documentary, edl, fcp7_xml, fcpxml,
-    fcpxml_validate, fillers, handles, jobs, models_catalog, motion,
-    preview, system_status, transcribe,
+    audio, broll, cache_io, captions, clips, documentary, edl, false_starts,
+    fcp7_xml, fcpxml, fcpxml_validate, fillers, handles, jobs, models_catalog,
+    motion, preview, system_status, tighten, transcribe,
 )
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
@@ -170,6 +170,53 @@ def register_tools(mcp: FastMCP) -> None:
         sequence_spec: dict, handle_sec: float = 0.5,
     ) -> ToolResponse:
         return _add_handles_to_spec(sequence_spec, handle_sec)
+
+    # ----- v0.9.0: waveform-based tightening --------------------------------
+
+    @mcp.tool(description=desc.FIND_AUDIO_SILENCES)
+    def find_audio_silences(
+        video_path: str,
+        min_silence_sec: float = 0.3,
+        threshold_db: float = -40.0,
+        start_sec: float | None = None,
+        end_sec: float | None = None,
+    ) -> ToolResponse:
+        return _find_audio_silences(
+            video_path, min_silence_sec, threshold_db, start_sec, end_sec,
+        )
+
+    @mcp.tool(description=desc.DETECT_BREATHS)
+    def detect_breaths(
+        video_path: str, transcript_path: str,
+        start_sec: float | None = None, end_sec: float | None = None,
+    ) -> ToolResponse:
+        return _detect_breaths(video_path, transcript_path, start_sec, end_sec)
+
+    @mcp.tool(description=desc.DETECT_FALSE_STARTS)
+    def detect_false_starts(
+        transcript_path: str,
+        start_sec: float | None = None,
+        end_sec: float | None = None,
+        max_gap_sec: float = 2.0,
+    ) -> ToolResponse:
+        return _detect_false_starts(transcript_path, start_sec, end_sec, max_gap_sec)
+
+    @mcp.tool(description=desc.TIGHTEN_TAKE)
+    def tighten_take(
+        video_path: str, transcript_path: str,
+        start_sec: float, end_sec: float,
+        min_silence_sec: float = 0.3,
+        silence_threshold_db: float = -40.0,
+        min_segment_sec: float = 0.4,
+        include_fillers: bool = True,
+        include_breaths: bool = True,
+        include_false_starts: bool = True,
+    ) -> ToolResponse:
+        return _tighten_take(
+            video_path, transcript_path, start_sec, end_sec,
+            min_silence_sec, silence_threshold_db, min_segment_sec,
+            include_fillers, include_breaths, include_false_starts,
+        )
 
     # ----- Async-job tools (return job_id, work in subprocess) ---------------
 
@@ -978,5 +1025,134 @@ def _add_handles_to_spec(
         "ship_it": (
             "Pass the returned sequence_spec to generate_fcpxml. The cut "
             "plays the same; editors now have head/tail handles in the NLE."
+        ),
+    })
+
+
+# ----- v0.9.0 implementations ------------------------------------------
+
+
+def _find_audio_silences(
+    video_path: str,
+    min_silence_sec: float,
+    threshold_db: float,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> ToolResponse:
+    p = abs_file(video_path)
+    if isinstance(p, ToolResponse):
+        return p
+    if start_sec is not None and end_sec is not None and end_sec <= start_sec:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"end_sec ({end_sec}) must be > start_sec ({start_sec})")
+    if min_silence_sec < 0.05:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"min_silence_sec must be >= 0.05, got {min_silence_sec}")
+    try:
+        result = audio.find_audio_silences(
+            p, min_silence_sec=min_silence_sec, threshold_db=threshold_db,
+            start_sec=start_sec, end_sec=end_sec,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("find_audio_silences failed")
+        return to_error(e)
+    next_steps = None
+    if result["silences"]:
+        next_steps = {
+            "fuse_with_transcript": (
+                "Combine with find_silences (transcript) to catch BOTH "
+                "inter-segment and intra-segment dead air. Or skip the merge "
+                "and just call tighten_take, which does it all at once."
+            ),
+        }
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
+
+
+def _detect_breaths(
+    video_path: str, transcript_path: str,
+    start_sec: float | None, end_sec: float | None,
+) -> ToolResponse:
+    p = abs_file(video_path)
+    if isinstance(p, ToolResponse):
+        return p
+    tp = abs_file(transcript_path)
+    if isinstance(tp, ToolResponse):
+        return tp
+    if start_sec is not None and end_sec is not None and end_sec <= start_sec:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"end_sec ({end_sec}) must be > start_sec ({start_sec})")
+    try:
+        result = audio.detect_breaths(
+            p, tp, start_sec=start_sec, end_sec=end_sec,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("detect_breaths failed")
+        return to_error(e)
+    return ToolResponse(ok=True, data=result)
+
+
+def _detect_false_starts(
+    transcript_path: str,
+    start_sec: float | None,
+    end_sec: float | None,
+    max_gap_sec: float,
+) -> ToolResponse:
+    tp = abs_file(transcript_path)
+    if isinstance(tp, ToolResponse):
+        return tp
+    if start_sec is not None and end_sec is not None and end_sec <= start_sec:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"end_sec ({end_sec}) must be > start_sec ({start_sec})")
+    if not (0.1 <= max_gap_sec <= 10.0):
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"max_gap_sec must be in [0.1, 10.0], got {max_gap_sec}")
+    try:
+        result = false_starts.detect_false_starts(
+            tp, start_sec=start_sec, end_sec=end_sec, max_gap_sec=max_gap_sec,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("detect_false_starts failed")
+        return to_error(e)
+    return ToolResponse(ok=True, data=result)
+
+
+def _tighten_take(
+    video_path: str, transcript_path: str,
+    start_sec: float, end_sec: float,
+    min_silence_sec: float, silence_threshold_db: float, min_segment_sec: float,
+    include_fillers: bool, include_breaths: bool, include_false_starts: bool,
+) -> ToolResponse:
+    p = abs_file(video_path)
+    if isinstance(p, ToolResponse):
+        return p
+    tp = abs_file(transcript_path)
+    if isinstance(tp, ToolResponse):
+        return tp
+    try:
+        result = tighten.tighten_take(
+            p, tp, start_sec=start_sec, end_sec=end_sec,
+            min_silence_sec=min_silence_sec,
+            silence_threshold_db=silence_threshold_db,
+            min_segment_sec=min_segment_sec,
+            include_fillers=include_fillers,
+            include_breaths=include_breaths,
+            include_false_starts=include_false_starts,
+        )
+    except ValueError as e:
+        return ToolResponse(ok=False, error="invalid_spec", message=str(e))
+    except Exception as e:  # noqa: BLE001
+        log.exception("tighten_take failed")
+        return to_error(e)
+    return ToolResponse(ok=True, data=result, next_steps={
+        "ship_each_sub_segment": (
+            "Drop each `tight_segments` entry into the SequenceSpec as an "
+            "ARollSegment with the same source_in_sec / source_out_sec. "
+            "The agent doesn't need to do any merge math — this tool already "
+            "did it."
+        ),
+        "iterate": (
+            "If `time_saved_pct` looks too low, drop `min_silence_sec` to "
+            "0.15 or bump `silence_threshold_db` to -30 for noisy field "
+            "audio. If the cut feels choppy, raise `min_segment_sec` to 0.6."
         ),
     })
