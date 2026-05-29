@@ -331,6 +331,80 @@ ANALYZE_MOTION = (
     "resolution misses cuts."
 )
 
+DETECT_FILLERS = (
+    "Find filler words ('um', 'uh', 'you know', 'like', 'I mean', "
+    "'actually', 'basically', etc.) inside a transcript window. "
+    "Returns each occurrence as `(start_sec, end_sec)` with exact "
+    "word-level timestamps from Whisper.\n\n"
+    "v0.8.0 workflow: pair this with `find_silences`. The two outputs "
+    "together give you a complete list of moments to skip when "
+    "assembling ARollSegments — silences (gaps in speech) plus fillers "
+    "(noise inside speech). Merge them, invert into speech_sub_segments, "
+    "and you get a cut that's typically 15-30% shorter than the raw "
+    "take without losing any meaningful content.\n\n"
+    "`patterns` lets you extend the default English set (e.g. add "
+    "'right?' for an interview that overuses it). Pure transcript "
+    "analysis — no audio probing. Synchronous, milliseconds."
+)
+
+DESCRIBE_CLIP = (
+    "Persist a structured caption for a b-roll clip so future sessions "
+    "can find it by content without re-vision-reading every contact "
+    "sheet. The cache lives at `cache/captions/<sha>.json` and survives "
+    "Claude Desktop restarts forever.\n\n"
+    "Recommended workflow: (1) call `extract_frame_grid(video_path)`, "
+    "(2) vision-read the returned image, (3) call this with a 1-2 "
+    "sentence `description` plus `tags` (single-word keywords) and an "
+    "optional `mood`. Once the b-roll library is captioned, "
+    "`search_broll(query)` becomes a one-call lookup instead of a "
+    "20-call vision marathon.\n\n"
+    "Idempotent: calling again on the same path overwrites the prior "
+    "caption (you can refine the description after seeing more frames). "
+    "Synchronous."
+)
+
+SEARCH_BROLL = (
+    "Case-insensitive substring search over cached b-roll captions "
+    "(see `describe_clip`). Returns the top N matches against "
+    "descriptions, tags, and mood, each with the full caption record "
+    "so you can rank without a follow-up call.\n\n"
+    "Use this when picking b-roll for a specific A-roll segment: pass "
+    "a keyword from the segment's transcript (`'product launch'`, "
+    "`'lake'`, `'speaker reaction'`) and get back the matching paths. "
+    "Beats vision-reading 30 contact sheets every session.\n\n"
+    "Optional `folder_path` scopes the search to captions whose source "
+    "file lives under that folder. Synchronous, milliseconds."
+)
+
+RENDER_PREVIEW = (
+    "Render a low-res MP4 preview of a SequenceSpec so you (or the "
+    "user) can sanity-check the cut BEFORE opening Final Cut. Same "
+    "spec you'd pass to `generate_fcpxml`, just rendered to 480×270 "
+    "H.264 via ffmpeg concat instead of emitting timeline XML.\n\n"
+    "v0.8.0 is V1-only (B-roll inserts are noted in the response but "
+    "not visually overlaid). The preview is enough to QC pacing, "
+    "transcript-content choices, dead air, and overall feel. ~2-5s "
+    "to render even on a long cut.\n\n"
+    "Call this AFTER you've assembled a candidate SequenceSpec but "
+    "BEFORE generate_fcpxml. If the preview looks bad, iterate the "
+    "spec; if it looks good, ship it. Synchronous."
+)
+
+ADD_HANDLES_TO_SPEC = (
+    "Return a copy of a SequenceSpec with `handle_sec` of source-handle "
+    "pad on every A-roll and B-roll segment. The cut plays the same "
+    "content; the NLE editor gets head/tail frames to fine-tune cuts "
+    "in the timeline without re-pulling source media.\n\n"
+    "Standard editorial convention is 12-24 frames (0.5-1.0s at 24fps). "
+    "Default is 0.5s. Bounds: source_in_sec is clamped at 0, "
+    "source_out_sec at the file's actual duration (ffprobed). "
+    "timeline_offset_sec on B-roll is preserved — only the source-media "
+    "window grows.\n\n"
+    "Call this RIGHT BEFORE `generate_fcpxml` — handles make the cut "
+    "more editable in FCP / Premiere / Resolve without changing what "
+    "the audience sees. Synchronous."
+)
+
 LOOKUP_TRANSCRIPT_BY_VIDEO_PATH = (
     "Given an absolute video path, find the cached transcript JSON "
     "for that file (or report `found=False`). Saves the agent from "
