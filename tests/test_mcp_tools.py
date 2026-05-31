@@ -131,6 +131,8 @@ def test_build_server_registers_expected_tools() -> None:
     # v0.9.0: waveform-based tightening + fused tighten_take
     assert {"find_audio_silences", "detect_breaths",
             "detect_false_starts", "tighten_take"}.issubset(names)
+    # v0.10.0: multi-modal segment watching
+    assert "watch_segment" in names
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:

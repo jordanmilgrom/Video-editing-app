@@ -29,6 +29,15 @@ quality drops noticeably.
                     start_segment=0)            the keepers. Paginate via
                                                 next_start if has_more.
 
+6b. watch_segment(video_path=X,                v0.10.0: when picking
+                  start_sec=A, end_sec=B,        between candidate takes
+                  transcript_path=T)             or verifying a moment
+    → contact sheet (16 frames) + transcript    delivers what its
+      words in window + audio energy stats.     transcript text promises.
+    → The "actually watch the clip" tool —      Statistical detectors tell
+      use when statistical detectors aren't     you WHERE things are;
+      enough and you need to SEE the take.      watch_segment lets you SEE.
+
 ──── B-roll captioning (one-time per clip, cached forever) ────
 
 7.  for clip in broll_folder:                  Check cache first; only
