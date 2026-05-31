@@ -472,6 +472,34 @@ TIGHTEN_TAKE = (
     "`include_*` flags let you turn individual detectors off."
 )
 
+WATCH_SEGMENT = (
+    "**The 'actually watch the clip' tool.** Returns a contact-sheet image "
+    "of `num_frames` (default 16) evenly-spaced frames from "
+    "`[start_sec, end_sec]` with timecodes overlaid, PLUS the transcript "
+    "words inside that window (if `transcript_path` is supplied) PLUS audio "
+    "energy stats (min/mean/max dBFS, silence %, speech %) — all bundled "
+    "into one tool result.\n\n"
+    "Use when you're picking BETWEEN candidate takes / segments, or when "
+    "you need to verify a moment delivers what its transcript text promises. "
+    "Statistical detectors (find_silences, tighten_take, detect_fillers, "
+    "analyze_motion) tell you WHERE words / pauses / motion are; this tool "
+    "lets you actually SEE the performance — eye contact, energy, gestures, "
+    "micro-expressions — and correlate frames with what was said.\n\n"
+    "How this differs from `extract_frame_grid`: extract_frame_grid samples "
+    "frames across an ENTIRE clip (good for triage / b-roll captioning). "
+    "watch_segment samples frames inside a SPECIFIC time window (good for "
+    "take selection). For a 30s segment with 16 frames you get one frame "
+    "every ~2s — fine-grained enough to see body language change between "
+    "shots.\n\n"
+    "Sidecar JSON includes `frame_timestamps_sec` (so you can cite "
+    "exact moments), `transcript.text` + `transcript.words` (word-level "
+    "stamps inside the window), and `audio_stats` (dBFS envelope summary "
+    "so you can tell loud / quiet sections without re-running a detector).\n\n"
+    "Synchronous, ~1-3s per call. Output is cached at "
+    "`cache/watch-sheets/<key>.jpg` — repeat calls with identical args are "
+    "free."
+)
+
 LOOKUP_TRANSCRIPT_BY_VIDEO_PATH = (
     "Given an absolute video path, find the cached transcript JSON "
     "for that file (or report `found=False`). Saves the agent from "
