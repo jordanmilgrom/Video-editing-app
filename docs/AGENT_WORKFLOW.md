@@ -2,9 +2,10 @@
 
 The 14-step shape of a real session, written so a fresh chat agent can
 follow it as a script. Each step lists the tool call and the field it
-expects in the response. v0.8.0 added the editorial-intelligence steps
-6-9 (transcript tightening + b-roll caching) and steps 12-13 (preview +
-handles) — older clients can skip them but quality drops noticeably.
+expects in the response. v0.9.0 collapsed the multi-detector A-roll
+tightening pass into a single `tighten_take` call; v0.8.0 added the
+captioning + preview + handles passes. Older clients can skip them but
+quality drops noticeably.
 
 ```
 0.  get_project_paths()                       → interview_folder, broll_folder
@@ -28,6 +29,15 @@ handles) — older clients can skip them but quality drops noticeably.
                     start_segment=0)            the keepers. Paginate via
                                                 next_start if has_more.
 
+6b. watch_segment(video_path=X,                v0.10.0: when picking
+                  start_sec=A, end_sec=B,        between candidate takes
+                  transcript_path=T)             or verifying a moment
+    → contact sheet (16 frames) + transcript    delivers what its
+      words in window + audio energy stats.     transcript text promises.
+    → The "actually watch the clip" tool —      Statistical detectors tell
+      use when statistical detectors aren't     you WHERE things are;
+      enough and you need to SEE the take.      watch_segment lets you SEE.
+
 ──── B-roll captioning (one-time per clip, cached forever) ────
 
 7.  for clip in broll_folder:                  Check cache first; only
@@ -39,13 +49,19 @@ handles) — older clients can skip them but quality drops noticeably.
 
 ──── Building the spine (A-roll) ────
 
-8.  for each long take you want to use:        v0.8.0: tighten BEFORE
-      find_silences(transcript_path=X,           you commit to a take's
-                    start_sec=A, end_sec=B)       raw start/end.
-      detect_fillers(transcript_path=X,
-                     start_sec=A, end_sec=B)
-    → Merge `silences` + `filler_ranges`; the inverse is your tight
-      list of ARollSegment ranges. Typically 15-30% shorter than raw.
+8.  for each long take you want to use:        v0.9.0: ONE call replaces
+      tighten_take(                              the v0.8 manual merge of
+        video_path=clip,                         find_silences + detect_fillers.
+        transcript_path=X,
+        start_sec=A, end_sec=B)
+    → Returns `tight_segments` — drop-in source_in/out_sec ranges for
+      multiple ARollSegments. Also `stats.time_saved_pct` so you can
+      iterate measurably. Typically 25-40% shorter than the raw take.
+    → If you need the components separately (rare): find_silences (gaps
+      between Whisper segments), find_audio_silences (waveform RMS,
+      catches gaps INSIDE segments), detect_fillers (um/uh/like),
+      detect_breaths (low-energy spans between words), detect_false_starts
+      ("I- I- I think").
 
 ──── Picking B-roll ────
 
