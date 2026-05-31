@@ -39,7 +39,7 @@ from mcp.types import TextContent
 from roughcut_core import (
     audio, broll, cache_io, captions, clips, documentary, edl, false_starts,
     fcp7_xml, fcpxml, fcpxml_validate, fillers, handles, jobs, models_catalog,
-    motion, preview, system_status, tighten, transcribe,
+    motion, preview, system_status, tighten, transcribe, watch,
 )
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
@@ -89,6 +89,19 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.GET_CLIP_THUMBNAIL)
     def get_clip_thumbnail(video_path: str, timecode_sec: float) -> Any:
         return _get_clip_thumbnail(video_path, timecode_sec)
+
+    @mcp.tool(description=desc.WATCH_SEGMENT)
+    def watch_segment(
+        video_path: str, start_sec: float, end_sec: float,
+        transcript_path: str | None = None,
+        num_frames: int = 16,
+        tile_size: int = broll.DEFAULT_TILE_SIZE,
+        jpeg_quality: int = broll.DEFAULT_JPEG_QUALITY,
+    ) -> Any:
+        return _watch_segment(
+            video_path, start_sec, end_sec, transcript_path,
+            num_frames, tile_size, jpeg_quality,
+        )
 
     @mcp.tool(description=desc.GET_PROJECT_PATHS)
     def get_project_paths() -> ToolResponse:
@@ -679,6 +692,41 @@ def _get_clip_thumbnail(video_path: str, timecode_sec: float) -> Any:
         return to_error(e)
     sidecar = json.dumps({"image_path": str(thumb_path), "timecode_sec": timecode_sec})
     return [Image(path=str(thumb_path)), TextContent(type="text", text=sidecar)]
+
+
+def _watch_segment(
+    video_path: str, start_sec: float, end_sec: float,
+    transcript_path: str | None,
+    num_frames: int, tile_size: int, jpeg_quality: int,
+) -> Any:
+    path = abs_file(video_path)
+    if isinstance(path, ToolResponse):
+        return path
+    tp: Path | None = None
+    if transcript_path:
+        tp_resolved = abs_file(transcript_path)
+        if isinstance(tp_resolved, ToolResponse):
+            return tp_resolved
+        tp = tp_resolved
+    if end_sec <= start_sec:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"end_sec ({end_sec}) must be > start_sec ({start_sec})")
+    if not (1 <= num_frames <= 64):
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"num_frames must be in [1, 64], got {num_frames}")
+    try:
+        result = watch.watch_segment(
+            path, start_sec, end_sec, cache_dir(None),
+            transcript_path=tp, num_frames=num_frames,
+            tile_size=tile_size, jpeg_quality=jpeg_quality,
+        )
+    except ValueError as e:
+        return ToolResponse(ok=False, error="invalid_spec", message=str(e))
+    except Exception as e:  # noqa: BLE001
+        log.exception("watch_segment failed")
+        return to_error(e)
+    sidecar = json.dumps(result)
+    return [Image(path=result["image_path"]), TextContent(type="text", text=sidecar)]
 
 
 def _get_project_paths() -> ToolResponse:
