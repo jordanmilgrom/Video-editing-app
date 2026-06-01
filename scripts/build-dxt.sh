@@ -30,6 +30,15 @@ PY_FLAGS=(
   --only-binary=:all:
 )
 
+# Detect --break-system-packages support. pip >= 23.0 (Feb 2023) enforces
+# PEP 668 on macOS and uses this flag to bypass it; older pip (e.g. Xcode
+# CLT's bundled 21.2.4) predates both the protection and the bypass flag,
+# so passing it errors out. Conditionally include.
+EXTRA_PIP_FLAGS=()
+if python3 -m pip install --help 2>/dev/null | grep -q -- '--break-system-packages'; then
+  EXTRA_PIP_FLAGS+=(--break-system-packages)
+fi
+
 echo "==> Clean $BUILD"
 rm -rf "$BUILD" "$ARTIFACT"
 mkdir -p "$BUILD/server/bin" "$BUILD/server/lib" "$BUILD/wheels"
@@ -75,7 +84,7 @@ python3 -m pip download \
 
 echo "==> Install wheels into server/lib"
 python3 -m pip install \
-  --target "$BUILD/server/lib" --no-deps --no-index --break-system-packages \
+  --target "$BUILD/server/lib" --no-deps --no-index "${EXTRA_PIP_FLAGS[@]}" \
   --find-links "$BUILD/wheels" \
   "${PY_PLATFORMS[@]}" "${PY_FLAGS[@]}" \
   "$BUILD"/wheels/*.whl \
@@ -106,7 +115,7 @@ if [ -n "${ROUGHCUT_SKIP_MODEL_BUNDLE:-}" ]; then
   echo "ROUGHCUT_SKIP_MODEL_BUNDLE was set; rebuild without it for a shippable .dxt." \
     > "$WHISPER_MODEL_DIR/.placeholder"
 else
-  python3 -m pip install --quiet --break-system-packages 'huggingface_hub>=0.20' >/dev/null
+  python3 -m pip install --quiet "${EXTRA_PIP_FLAGS[@]}" 'huggingface_hub>=0.20' >/dev/null
   mkdir -p "$WHISPER_MODEL_DIR"
   python3 - <<PY
 from huggingface_hub import snapshot_download
