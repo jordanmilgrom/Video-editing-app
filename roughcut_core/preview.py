@@ -66,18 +66,19 @@ def render_preview(
     """
     if not spec.aroll:
         raise ValueError("render_preview: spec.aroll is empty; nothing to render")
+
+    # Verify every source file exists before checking ffmpeg-on-PATH so a
+    # bad spec raises FileNotFoundError consistently regardless of the
+    # build host (ubuntu-latest CI doesn't have ffmpeg by default).
+    for seg in spec.aroll:
+        p = Path(seg.source_path)
+        if not p.is_file():
+            raise FileNotFoundError(seg.source_path)
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not found on PATH")
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Verify every source file exists before writing the concat list —
-    # ffmpeg's error on a missing file is cryptic.
-    for seg in spec.aroll:
-        p = Path(seg.source_path)
-        if not p.is_file():
-            raise FileNotFoundError(seg.source_path)
 
     # ffmpeg concat demuxer expects: "file '<path>'\ninpoint X\noutpoint Y"
     # per segment. Paths must be quoted to handle spaces; single quotes

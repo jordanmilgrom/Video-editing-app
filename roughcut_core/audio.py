@@ -57,11 +57,11 @@ def decode_audio_envelope(video_path: Path) -> np.ndarray:
     of that 50ms frame expressed in dBFS (0 = full scale, -inf = silent
     — actually we floor at -90 dBFS to keep things bounded).
     """
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("ffmpeg not found on PATH")
     video_path = Path(video_path)
     if not video_path.is_file():
         raise FileNotFoundError(video_path)
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found on PATH")
 
     raw = _decode_pcm(video_path)
     samples = np.frombuffer(raw, dtype=np.int16)
