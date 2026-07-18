@@ -4,9 +4,7 @@
 # Three jobs:
 #   1. build      — Linux-hosted cross-build. Outputs roughcut.dxt.
 #   2. smoke-test — macos-14 (arm64). Unpacks the .dxt, runs the bundled
-#                   python interpreter, imports mlx_whisper. Catches the
-#                   class of regression where a native dylib gets dropped
-#                   from the wheel set during cross-platform pip download.
+#                   python interpreter, imports mlx_whisper.
 #   3. release    — Linux-hosted. Creates / updates the GitHub Release
 #                   and attaches roughcut.dxt. Only runs if smoke-test
 #                   passed.
@@ -17,10 +15,14 @@ on:
   push:
     tags:
       - 'v*'
-  # v0.11.0: added workflow_dispatch so a release can be cut without
-  # local git access (proxy blocks tag pushes). Enter the version like
-  # "v0.11.0" and softprops/action-gh-release creates the tag at the
-  # dispatching SHA and publishes the .dxt.
+    branches: [main]
+    paths:
+      # v0.11.0 hack: when this file changes on main, cut a release for
+      # the version in RELEASE_VERSION.txt. Lets us ship without needing
+      # local git access to push tags (proxy-blocked). Remove this
+      # paths/branches trigger once tag pushes are restored.
+      - .github/workflows/release.yml
+      - RELEASE_VERSION.txt
   workflow_dispatch:
     inputs:
       version:
@@ -42,10 +44,6 @@ jobs:
         with:
           node-version: '20'
 
-      # v0.6.5 P-22: run the Python unit tests first, including the
-      # FCPXML validator's self-check on the canonical output. Catches
-      # the v0.6.4 "Invalid edit with no respective media" regression
-      # class before the .dxt build wastes CI time.
       - name: Install xmllint (libxml2-utils)
         run: sudo apt-get update && sudo apt-get install -y libxml2-utils
 
@@ -101,12 +99,6 @@ jobs:
   smoke-test:
     needs: build
     runs-on: macos-14
-    # No actions/checkout here — and that's intentional. With the repo
-    # checked out at $PWD, Python's cwd-based import machinery would
-    # load roughcut_core from the REPO copy (where models_catalog.py's
-    # __file__ resolves to repo/models, which doesn't exist) instead of
-    # the unpacked .dxt copy (where the bundled whisper-small lives).
-    # Surfaced as: AssertionError: resolved 'small' to non-path: …
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -115,21 +107,17 @@ jobs:
       - name: Unpack the .dxt
         run: |
           mkdir unpacked
-          # .dxt files are zip archives.
           unzip -q roughcut.dxt -d unpacked
           test -x unpacked/server/python/bin/python3.11
 
-      - name: Import smoke test — mlx_whisper must load (catches missing libmlx.dylib)
-        # The actual regression we're catching: `import mlx.core` triggers the
-        # native C extension load, which is where dyld will fail to resolve
-        # @rpath/libmlx.dylib if mlx-metal didn't make it into the bundle.
+      - name: Import smoke test — mlx_whisper must load
         run: |
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export PATH="$PWD/unpacked/server/python/bin:$PWD/unpacked/server/bin:$PATH"
           python3.11 -c "
           import sys
-          import mlx.core         # loads core.cpython-311-darwin.so → libmlx.dylib
-          import mlx_whisper      # pulls in mlx + numba + etc.
+          import mlx.core
+          import mlx_whisper
           print(f'python      : {sys.version.split()[0]}')
           print(f'mlx_whisper : {getattr(mlx_whisper, \"__version__\", \"?\")}')
           print('OK')
@@ -147,9 +135,6 @@ jobs:
           du -sh unpacked/server/models/whisper-small
 
       - name: Offline transcribe smoke test (HF_HUB_OFFLINE=1)
-        # Generate a tiny silent WAV, transcribe with the bundled small
-        # model, prove there's no network round-trip. Catches the
-        # regression where the bundled model isn't actually picked up.
         env:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
@@ -171,10 +156,6 @@ jobs:
           PY
 
       - name: Job-system end-to-end smoke test
-        # Spawns a tiny _test_noop job in the unpacked bundle, polls until
-        # succeeded, then exercises: cancel_job on an unknown id, list_jobs,
-        # and the startup recover_interrupted scan. Catches breakage in the
-        # subprocess plumbing without burning time on a real transcription.
         run: |
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export ROUGHCUT_CACHE_DIR="$PWD/smoke-cache"
@@ -186,12 +167,10 @@ jobs:
           cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
           cache.mkdir(parents=True, exist_ok=True)
 
-          # 1. Spawn — must return immediately with a job_id.
           j = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
           assert j.job_id, f"no job_id: {j}"
           print(f"spawned job_id={j.job_id} status={j.status}")
 
-          # 2. Poll for succeeded.
           deadline = time.time() + 10
           last = j
           while time.time() < deadline:
@@ -203,12 +182,10 @@ jobs:
           assert last.result_summary == {"echo": "ok"}, last.result_summary
           print(f"job succeeded: result_summary={last.result_summary}")
 
-          # 3. Idempotency: a re-spawn with same args returns the cached job.
           j2 = jobs.spawn(cache, "_test_noop", {"k": "smoke"})
           assert j2.job_id == j.job_id and j2.status == "succeeded"
           print(f"idempotent: re-spawn returned cached job_id={j2.job_id}")
 
-          # 4. Cancel: forge a fake running job, cancel it, status flips.
           fake = jobs.Job(
               job_id="bogus", tool_name="transcribe_video", args={},
               status="running", started_at=time.time(), updated_at=time.time(),
@@ -218,7 +195,6 @@ jobs:
           out = jobs.cancel(cache, "bogus")
           assert out.status == "cancelled", out
 
-          # 5. Recover scan: a 'running' job with a dead pid → interrupted.
           fake2 = jobs.Job(
               job_id="dead", tool_name="transcribe_video", args={},
               status="running", started_at=time.time(), updated_at=time.time(),
@@ -230,18 +206,11 @@ jobs:
           assert "dead" in ids, ids
           print(f"recover marked: {ids}")
 
-          # 6. Unknown id: read() returns None (caller maps to clean error).
           assert jobs.read(cache, "no-such-id") is None
           print("OK")
           PY
 
       - name: Concurrency burst — 20 jobs + list_jobs <1s (v0.6.3 lockup guard)
-        # v0.6.0..v0.6.2 spawned a subprocess per job → 31 parallel
-        # transcribe calls deadlocked the MCP server (Jordan's production
-        # crash). v0.6.3 enqueues against a single persistent worker.
-        # Fire 20 spawns in a tight loop, then immediately list_jobs —
-        # both must return fast, regardless of whether the worker has
-        # caught up yet.
         run: |
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export ROUGHCUT_CACHE_DIR="$PWD/burst-cache"
@@ -270,9 +239,6 @@ jobs:
           PY
 
       - name: Documentary mode — read_transcript pagination + search hit
-        # Lay down a synthetic transcript with two distinct phrases, then
-        # exercise read_transcript pagination and a search_transcripts hit.
-        # No mlx-whisper involved.
         run: |
           export PYTHONPATH="$PWD/unpacked/server:$PWD/unpacked/server/lib"
           export ROUGHCUT_CACHE_DIR="$PWD/docs-cache"
@@ -286,7 +252,6 @@ jobs:
           cache = Path(os.environ["ROUGHCUT_CACHE_DIR"])
           src = cache / "fake.mp4"; src.touch()
           path = cache / "transcripts" / "test" / "fake.json"
-          # Long enough to force pagination at a small max_chars.
           segments = [Segment(text=f"Wisconsin chunk {i} " + "x" * 400,
                               start=float(i), end=float(i + 1)) for i in range(8)]
           path.write_text(Transcript(
@@ -315,16 +280,34 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the RELEASE_VERSION.txt file for main-push builds.
+          sparse-checkout: |
+            RELEASE_VERSION.txt
+
       - uses: actions/download-artifact@v4
         with:
           name: roughcut-dxt
 
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.version }}"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            VER="${{ github.ref_name }}"
+          else
+            # push to main via file-change trigger — read from RELEASE_VERSION.txt
+            VER="$(cat RELEASE_VERSION.txt | tr -d '[:space:]')"
+          fi
+          echo "Resolved release tag: $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release and upload .dxt
         uses: softprops/action-gh-release@v2
         with:
-          # Use the manual input when workflow_dispatch fires; fall back
-          # to the pushed tag ref name for the classic tag-push flow.
-          tag_name: ${{ inputs.version || github.ref_name }}
+          tag_name: ${{ steps.tag.outputs.version }}
           files: roughcut.dxt
           generate_release_notes: true
           fail_on_unmatched_files: true
