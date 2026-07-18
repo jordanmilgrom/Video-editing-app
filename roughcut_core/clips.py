@@ -30,12 +30,13 @@ def probe_clip(video_path: Path) -> ClipMeta:
         check=True, capture_output=True, text=True,
     )
     data = json.loads(out.stdout)
+    streams = data.get("streams", [])
     video_stream = next(
-        (s for s in data.get("streams", []) if s.get("codec_type") == "video"),
-        None,
+        (s for s in streams if s.get("codec_type") == "video"), None,
     )
     if video_stream is None:
         raise ValueError(f"No video stream in {video_path}")
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
 
     fmt = data.get("format", {})
     return ClipMeta(
@@ -46,6 +47,7 @@ def probe_clip(video_path: Path) -> ClipMeta:
         height=int(video_stream.get("height", 0)),
         codec=str(video_stream.get("codec_name", "unknown")),
         size_bytes=int(fmt.get("size", 0)),
+        has_audio=has_audio,
     )
 
 
