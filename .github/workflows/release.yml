@@ -17,6 +17,16 @@ on:
   push:
     tags:
       - 'v*'
+  # v0.11.0: added workflow_dispatch so a release can be cut without
+  # local git access (proxy blocks tag pushes). Enter the version like
+  # "v0.11.0" and softprops/action-gh-release creates the tag at the
+  # dispatching SHA and publishes the .dxt.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to create (e.g. v0.11.0)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -312,6 +322,9 @@ jobs:
       - name: Create GitHub Release and upload .dxt
         uses: softprops/action-gh-release@v2
         with:
+          # Use the manual input when workflow_dispatch fires; fall back
+          # to the pushed tag ref name for the classic tag-push flow.
+          tag_name: ${{ inputs.version || github.ref_name }}
           files: roughcut.dxt
           generate_release_notes: true
           fail_on_unmatched_files: true
