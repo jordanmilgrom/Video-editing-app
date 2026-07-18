@@ -388,6 +388,18 @@ def _do_test_boom(job: jobs.Job, cache_dir: Path) -> tuple[None, dict]:
     raise RuntimeError("intentional test failure")
 
 
+def _do_render_cut(job: jobs.Job, cache_dir: Path) -> tuple[Path, dict]:
+    from roughcut_core import render
+    from roughcut_core.models import SequenceSpec
+    spec = SequenceSpec.model_validate(job.args["sequence_spec"])
+    output_path = Path(job.args["output_path"])
+    preset = job.args.get("preset", render.DEFAULT_PRESET)
+    _step(job, cache_dir, f"rendering {preset} via ffmpeg", progress=10.0)
+    result = render.render_cut(spec, output_path, preset=preset)
+    _step(job, cache_dir, "encode complete", progress=100.0)
+    return Path(result["output_path"]), result
+
+
 _HANDLERS = {
     "transcribe_video": _do_transcribe_video,
     "cluster_takes_by_silence": _do_cluster,
@@ -396,6 +408,7 @@ _HANDLERS = {
     "diarize_speakers": _do_diarize,
     "pick_angle_per_segment": _do_pick_angle,
     "prewarm_model": _do_prewarm_model,
+    "render_cut": _do_render_cut,
     "_test_noop": _do_test_noop,
     "_test_sleep": _do_test_sleep,
     "_test_boom": _do_test_boom,
