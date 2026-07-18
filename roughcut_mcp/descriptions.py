@@ -49,10 +49,11 @@ GET_SERVER_LOGS = (
 )
 
 GENERATE_FCPXML = (
-    "Write three timeline files + EDL relink sidecar from one call:\n"
+    "Write four timeline files + EDL relink sidecar from one call:\n"
     "  - `<basename>.fcpxml` (Final Cut Pro 1.10)\n"
     "  - `<basename>.xml`    (Premiere — FCP 7 XMEML v5)\n"
     "  - `<basename>.edl`    (CMX 3600, universal V1 fallback)\n"
+    "  - `<basename>.otio`   (OpenTimelineIO — Resolve import + otiotool)\n"
     "  - `<basename>.relink.csv` (reel → source mapping for the EDL)\n\n"
     "All four share the same basename derived from `output_path`. A-roll "
     "is laid out contiguously on V1, b-roll inserts nest on V2. The "
@@ -139,6 +140,25 @@ _ASYNC_NOTE = (
     "Concurrency: the worker pool is capped at `ROUGHCUT_WORKER_POOL_SIZE` "
     "(default 4). Jobs beyond that sit in the queue with `queue_position` "
     "indicating how many ahead; workers drain the queue strictly FIFO."
+)
+
+TRANSCRIBE_FOLDER = (
+    "One-call batch transcription: enumerates every video in `folder` "
+    "and spawns one transcribe_video job per clip. Skips clips already "
+    "cached (returns their transcript_path immediately) and, when "
+    "`skip_silent=True` (default), clips whose ffprobe reports no audio "
+    "stream — silent b-roll where whisper would just hallucinate.\n\n"
+    "Response includes three lists: `cached` (transcripts already on "
+    "disk, no work), `silent_skipped` (video-only clips), and `spawned` "
+    "(new jobs with their job_ids). Poll each spawned job_id with "
+    "check_job_status until status='succeeded'.\n\n"
+    "Use this INSTEAD of calling transcribe_video N times. On a 32-clip "
+    "folder that replaces 32 tool calls with 1 and lets you see up front "
+    "which clips are silent (skip) vs. already-transcribed (skip) vs. "
+    "queued (poll). Synchronous but fast — just spawns worker subprocesses. "
+    "The transcription itself runs async via the pool.\n\n"
+    "`recursive` (default True) walks subdirectories; `language` and "
+    "`model` are per-clip settings passed to each spawned transcribe_video."
 )
 
 TRANSCRIBE_VIDEO = (
@@ -314,6 +334,28 @@ FIND_SILENCES = (
     "committing. Synchronous, milliseconds."
 )
 
+DETECT_SCENES = (
+    "Shot / scene boundary detection with a representative frame per shot. "
+    "Composes analyze_motion (finds cuts) with frame extraction (one "
+    "thumbnail per shot). Returns a list of shots — each with start_sec, "
+    "end_sec, and `rep_frame_path` pointing at a cached JPEG on disk.\n\n"
+    "Use when you want to SURVEY a long b-roll clip by content: read each "
+    "shot's rep_frame_path via `get_clip_thumbnail` (which returns it as "
+    "inline image content) and vision-decide which shots to caption or "
+    "use. Beats scrubbing through the timeline in an NLE.\n\n"
+    "How this differs from `analyze_motion`: analyze_motion returns motion "
+    "spans (static / slow_pan / fast_pan / cut) — no visual context. "
+    "detect_scenes uses THOSE cut spans as boundaries and adds one "
+    "thumbnail per shot so you can see it. If you only need stable-span "
+    "info for b-roll picking, use analyze_motion; if you're surveying "
+    "unknown footage, use detect_scenes.\n\n"
+    "`min_shot_sec` (default 1.0) drops sub-second noise around cut "
+    "transitions. `sample_hz` (default 2.0) is analyze_motion's temporal "
+    "resolution — bump to 4 for fast-paced footage.\n\n"
+    "Cached at `cache/scene-frames/<key>_shot<n>_<ms>.jpg`. Synchronous, "
+    "~1-3s per minute of source."
+)
+
 ANALYZE_MOTION = (
     "Frame-diff a video clip (sampled at `sample_hz` Hz, default 2) "
     "and return spans tagged static / slow_pan / fast_pan / cut. "
@@ -404,6 +446,25 @@ ADD_HANDLES_TO_SPEC = (
     "more editable in FCP / Premiere / Resolve without changing what "
     "the audience sees. Synchronous."
 )
+
+RENDER_CUT = (
+    "Render a SequenceSpec at delivery quality (H.264/AAC MP4) via ffmpeg "
+    "concat. Distinct from `render_preview` — preview is a 480x270 "
+    "sanity-check MP4 for fast QC; render_cut is what you hand off to a "
+    "client or upload.\n\n"
+    "**Presets:** `720p30` (1280×720 CRF 20), `1080p30` (1920×1080 CRF 18, "
+    "DEFAULT), `1080p60` (1920×1080 CRF 18 60fps), `4k30` (3840×2160 CRF 20). "
+    "Custom sizes via preset params; contact us to add more.\n\n"
+    "Runs asynchronously through the worker pool. A 30-minute cut at "
+    "1080p30 takes 1-3 minutes to encode on Apple Silicon. Poll "
+    "`check_job_status(job_id)` until status='succeeded', then read "
+    "`result_summary.output_path` for the delivered file.\n\n"
+    "v0.11.0 renders the A-roll spine only (V1). B-roll inserts in the "
+    "SequenceSpec are counted in `broll_count_skipped` but not composited "
+    "— that's a v0.12+ feature. To ship a cut with b-roll TODAY, generate "
+    "the FCPXML/XML/EDL via `generate_fcpxml` and open the timeline in "
+    "Final Cut / Premiere / Resolve, then export from there."
+) + _ASYNC_NOTE
 
 FIND_AUDIO_SILENCES = (
     "Detect silences by examining the actual audio waveform. ffmpeg "
@@ -498,6 +559,27 @@ WATCH_SEGMENT = (
     "Synchronous, ~1-3s per call. Output is cached at "
     "`cache/watch-sheets/<key>.jpg` — repeat calls with identical args are "
     "free."
+)
+
+INDEX_PROJECT = (
+    "One-call project inventory. Enumerates every video in `folder` and "
+    "returns a compact entry per clip that composes: ffprobe metadata "
+    "(duration, resolution, `has_audio`), transcript status (cached / "
+    "silent / missing) with `opening_200_chars` and `top_segments` when "
+    "present, and any cached b-roll caption (description, tags, mood).\n\n"
+    "Use this AT THE START of any documentary session — it replaces the "
+    "old fan-out pattern (list_clips + N × summarize_clip + N × "
+    "lookup_transcript + N × read_caption) with one call whose response "
+    "fits in a single turn. From there the agent picks which clips are "
+    "worth reading in full (`read_transcript`), transcribing "
+    "(`transcribe_folder`), or captioning (`extract_frame_grid` → "
+    "`describe_clip`).\n\n"
+    "Every underlying capability caches its own state, so re-indexing "
+    "a folder that hasn't changed is close to free. `include_top_segments` "
+    "(default 2) controls how many of the longest transcript segments "
+    "are inlined per clip as quick-scan quotes — bump to 5 for deeper "
+    "scan, drop to 0 to keep the response minimal. Synchronous, "
+    "~10s for a 32-clip folder on first pass; ms after cache warm."
 )
 
 LOOKUP_TRANSCRIPT_BY_VIDEO_PATH = (
