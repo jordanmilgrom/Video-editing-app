@@ -13,18 +13,19 @@ quality drops noticeably.
 1.  prewarm_model(model_name='large-v3')      → fire-and-forget; no need
                                                 to wait. Skip if 'small'
                                                 is enough for the shoot.
-2.  list_clips(folder=interview_folder)       → data.clip_paths[]
-3.  lookup_transcript_by_video_path(path=X)   → found=False ⇒ call (4)
-                                                found=True  ⇒ skip to (5)
-4.  for clip in clip_paths:                   ≤4 concurrent (the worker
-      transcribe_video(video_path=clip,         pool caps the rest into a
-                       language='en')           queue with queue_position
-                                                reported on each spawn).
-    Poll each job_id with check_job_status
-    until status='succeeded'.
-5.  for transcript in transcripts:            cheap, ms-scale. Use this
-      summarize_clip(transcript_path=X)         to triage which clips
-                                                are interesting.
+2.  index_project(folder=interview_folder)    → v0.11.0: ONE call replaces
+    → per-clip: duration, has_audio,            steps 3-5 for the vast
+      transcript status, opening_200_chars,     majority of shoots. Only
+      top_segments, caption (if any)            fall back to (3-5) if you
+                                                need per-clip precision.
+3.  transcribe_folder(                         → v0.11.0: replaces the
+      folder=interview_folder,                    per-clip fan-out. Skips
+      language='en', model='large-v3')            silent b-roll + cached
+    → cached: already-done transcripts          hits. Returns job_ids for
+      spawned: new job_ids to poll              each new transcription.
+      silent_skipped: video-only clips
+4.  poll each spawned job_id via check_job_status until succeeded.
+5.  (implicit — index_project already surfaces summaries for cached clips).
 6.  read_transcript(transcript_path=X,        full-fidelity read for
                     start_segment=0)            the keepers. Paginate via
                                                 next_start if has_more.
@@ -40,7 +41,13 @@ quality drops noticeably.
 
 ──── B-roll captioning (one-time per clip, cached forever) ────
 
-7.  for clip in broll_folder:                  Check cache first; only
+7a. detect_scenes(video_path=X)                v0.11.0: for LONG b-roll
+    → shots + rep_frame_path per shot           clips (>10s), survey the
+    → get_clip_thumbnail(rep_frame_path)        content by looking at one
+      to vision-read each shot's content        rep frame per shot. Cheaper
+                                                than extract_frame_grid on
+                                                a whole clip.
+7b. for clip in broll_folder:                  Check cache first; only
       extract_frame_grid(video_path=clip)        caption clips that don't
       → vision-read the returned image          already have a description.
       describe_clip(video_path=clip,
@@ -91,15 +98,24 @@ quality drops noticeably.
                                                 the NLE. Skip if you want
                                                 a frame-precise cut.
 
-13. generate_fcpxml(                          → emits .fcpxml + .xml + .edl
-        sequence_spec={ … },                    + .relink.csv, self-validates,
-        output_path='/abs/cut.fcpxml')          returns import_hints per NLE.
+13. generate_fcpxml(                          → v0.11.0: emits .fcpxml +
+        sequence_spec={ … },                    .xml + .edl + .otio +
+        output_path='/abs/cut.fcpxml')          .relink.csv, self-validates,
+                                                returns import_hints per NLE.
 
 14. validate_fcpxml(fcpxml_path=X)            confirm before handing off.
                                                 (already run internally;
                                                 only call this directly
                                                 when debugging an existing
                                                 file.)
+
+15. render_cut(                                v0.11.0 OPTIONAL: render an
+        sequence_spec={ … },                    MP4 deliverable at 720p30
+        output_path='/abs/cut.mp4',             / 1080p30 / 1080p60 / 4k30.
+        preset='1080p30')                       Async — poll job_id. Use
+    → job_id → poll → succeeded                 when you want a self-
+      → result_summary.output_path              contained file, not an NLE
+                                                project.
 ```
 
 ## Concurrency contract
