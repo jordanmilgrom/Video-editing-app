@@ -38,8 +38,9 @@ from mcp.types import TextContent
 
 from roughcut_core import (
     audio, broll, cache_io, captions, clips, documentary, edl, false_starts,
-    fcp7_xml, fcpxml, fcpxml_validate, fillers, handles, jobs, models_catalog,
-    motion, preview, system_status, tighten, transcribe, watch,
+    fcp7_xml, fcpxml, fcpxml_validate, fillers, handles, index as project_index,
+    jobs, models_catalog, motion, otio_export, preview, scenes, system_status,
+    tighten, transcribe, watch,
 )
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
@@ -139,6 +140,12 @@ def register_tools(mcp: FastMCP) -> None:
     def lookup_transcript_by_video_path(video_path: str) -> ToolResponse:
         return _lookup_transcript_by_video_path(video_path)
 
+    @mcp.tool(description=desc.INDEX_PROJECT)
+    def index_project(
+        folder: str, recursive: bool = True, include_top_segments: int = 2,
+    ) -> ToolResponse:
+        return _index_project(folder, recursive, include_top_segments)
+
     @mcp.tool(description=desc.FIND_SILENCES)
     def find_silences(
         transcript_path: str, start_sec: float, end_sec: float,
@@ -149,6 +156,12 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(description=desc.ANALYZE_MOTION)
     def analyze_motion(video_path: str, sample_hz: float = 2.0) -> ToolResponse:
         return _analyze_motion(video_path, sample_hz)
+
+    @mcp.tool(description=desc.DETECT_SCENES)
+    def detect_scenes(
+        video_path: str, sample_hz: float = 2.0, min_shot_sec: float = 1.0,
+    ) -> ToolResponse:
+        return _detect_scenes(video_path, sample_hz, min_shot_sec)
 
     # ----- v0.8.0: editorial intelligence II --------------------------------
 
@@ -183,6 +196,13 @@ def register_tools(mcp: FastMCP) -> None:
         sequence_spec: dict, handle_sec: float = 0.5,
     ) -> ToolResponse:
         return _add_handles_to_spec(sequence_spec, handle_sec)
+
+    @mcp.tool(description=desc.RENDER_CUT)
+    def render_cut(
+        sequence_spec: dict, output_path: str,
+        preset: str = "1080p30",
+    ) -> ToolResponse:
+        return _render_cut_async(sequence_spec, output_path, preset)
 
     # ----- v0.9.0: waveform-based tightening --------------------------------
 
@@ -244,6 +264,15 @@ def register_tools(mcp: FastMCP) -> None:
         return _spawn("transcribe_video", {
             "video_path": str(path), "language": language, "model": model,
         })
+
+    @mcp.tool(description=desc.TRANSCRIBE_FOLDER)
+    def transcribe_folder(
+        folder: str, language: str = "en",
+        model: str = models_catalog.DEFAULT_MODEL,
+        recursive: bool = True,
+        skip_silent: bool = True,
+    ) -> ToolResponse:
+        return _transcribe_folder(folder, language, model, recursive, skip_silent)
 
     @mcp.tool(description=desc.PREWARM_MODEL)
     def prewarm_model(model_name: str = "large-v3") -> ToolResponse:
@@ -470,6 +499,88 @@ def _resume_job(job_id: str) -> ToolResponse:
     })
 
 
+def _transcribe_folder(
+    folder: str, language: str, model: str,
+    recursive: bool, skip_silent: bool,
+) -> ToolResponse:
+    """Fan out one transcribe_video job per clip in `folder`.
+
+    Skips clips already transcribed with `model` (cache hit) and, when
+    `skip_silent=True`, clips with no audio stream (a common b-roll case
+    where whisper would just hallucinate).
+
+    Returns per-clip status: cached / silent / job_id.
+    """
+    path = abs_dir(folder)
+    if isinstance(path, ToolResponse):
+        return path
+    if model not in models_catalog.SHORT_TO_HF:
+        return ToolResponse(
+            ok=False, error="invalid_spec",
+            message=(f"unknown model '{model}'. "
+                     f"Choices: {list(models_catalog.SHORT_TO_HF)}"),
+        )
+    try:
+        metas = clips.list_clips(path, recursive=recursive)
+    except Exception as e:  # noqa: BLE001
+        log.exception("transcribe_folder: list_clips failed")
+        return to_error(e)
+
+    cdir = cache_dir(None)
+    cached: list[dict] = []
+    skipped_silent: list[dict] = []
+    spawned: list[dict] = []
+    for m in metas:
+        clip_str = str(m.path)
+        if skip_silent and not m.has_audio:
+            skipped_silent.append({"video_path": clip_str,
+                                   "reason": "no audio stream"})
+            continue
+        try:
+            hit = documentary.lookup_transcript_by_video_path(m.path, cdir)
+        except Exception:  # noqa: BLE001
+            hit = {"found": False}
+        if hit.get("found"):
+            cached.append({
+                "video_path": clip_str,
+                "transcript_path": hit["best_match"]["transcript_path"],
+                "segment_count": hit["best_match"]["segment_count"],
+            })
+            continue
+        try:
+            job = jobs.spawn(cdir, "transcribe_video", {
+                "video_path": clip_str, "language": language, "model": model,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.exception("transcribe_folder: spawn failed for %s", clip_str)
+            spawned.append({"video_path": clip_str, "error": str(e)})
+            continue
+        spawned.append({
+            "video_path": clip_str,
+            "job_id": job.job_id,
+            "status": job.status,
+        })
+
+    return ToolResponse(ok=True, data={
+        "folder": str(path),
+        "clip_count": len(metas),
+        "cached_count": len(cached),
+        "silent_skipped_count": len(skipped_silent),
+        "spawned_count": len([s for s in spawned if "job_id" in s]),
+        "error_count": len([s for s in spawned if "error" in s]),
+        "cached": cached,
+        "silent_skipped": skipped_silent,
+        "spawned": spawned,
+    }, next_steps={
+        "poll_all": (
+            "For each entry in `spawned` that has a job_id, poll "
+            "check_job_status(job_id) until status='succeeded'. Cached "
+            "entries are ready now — read them via read_transcript."
+        ),
+        "read_cached_now": "read_transcript(transcript_path='<from cached[i]>')",
+    })
+
+
 # ----- Synchronous tool implementations -------------------------------------
 
 
@@ -547,10 +658,12 @@ def _generate_fcpxml(sequence_spec_data: dict, output_path: str) -> ToolResponse
     fcpxml_path = out.with_suffix(".fcpxml")
     fcp7_path = out.with_suffix(".xml")
     edl_path = out.with_suffix(".edl")
+    otio_path = out.with_suffix(".otio")
     try:
         fcpxml.write_fcpxml(spec, fcpxml_path)
         fcp7_xml.write_fcp7_xml(spec, fcp7_path)
         edl_meta = edl.write_edl(spec, edl_path)
+        otio_export.write_otio(spec, otio_path)
     except Exception as e:  # noqa: BLE001
         log.exception("generate_fcpxml failed")
         return to_error(e)
@@ -574,6 +687,7 @@ def _generate_fcpxml(sequence_spec_data: dict, output_path: str) -> ToolResponse
         "fcpxml_path": str(fcpxml_path),
         "fcp7_xml_path": str(fcp7_path),
         "edl_path": str(edl_path),
+        "otio_path": str(otio_path),
         "relink_csv_path": edl_meta["relink_csv_path"],
         "edl_note": edl_meta["edl_note"],
         "aroll_count": len(spec.aroll), "broll_count": len(spec.broll),
@@ -585,11 +699,12 @@ def _generate_fcpxml(sequence_spec_data: dict, output_path: str) -> ToolResponse
             "final_cut_pro": str(fcpxml_path),
             "premiere_pro": str(fcp7_path),
             "fallback_any_nle": str(edl_path),
+            "resolve_via_otio": str(otio_path),
         },
     }, next_steps={
         "verify": f"validate_fcpxml(fcpxml_path='{fcpxml_path}')",
         "open_in_finder": (
-            f"The .fcpxml/.xml/.edl/.relink.csv are siblings at "
+            f"The .fcpxml/.xml/.edl/.otio/.relink.csv are siblings at "
             f"'{out.parent}'."
         ),
     })
@@ -813,6 +928,42 @@ def _summarize_clip(transcript_path: str) -> ToolResponse:
     })
 
 
+def _index_project(
+    folder: str, recursive: bool, include_top_segments: int,
+) -> ToolResponse:
+    path = abs_dir(folder)
+    if isinstance(path, ToolResponse):
+        return path
+    if not (0 <= include_top_segments <= 20):
+        return ToolResponse(
+            ok=False, error="invalid_spec",
+            message=f"include_top_segments must be in [0, 20], got {include_top_segments}",
+        )
+    try:
+        result = project_index.index_project(
+            path, cache_dir(None),
+            recursive=recursive, include_top_segments=include_top_segments,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("index_project failed")
+        return to_error(e)
+    next_steps = None
+    if result["clip_count"]:
+        pending = [
+            c["path"] for c in result["clips"]
+            if c["transcript"].get("status") == "missing"
+        ]
+        if pending:
+            next_steps = {
+                "transcribe_missing": (
+                    "transcribe_folder(folder='<same folder>') will fan out "
+                    f"jobs for the {len(pending)} clip(s) whose transcripts "
+                    "aren't cached yet."
+                ),
+            }
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
+
+
 def _lookup_transcript_by_video_path(video_path: str) -> ToolResponse:
     """Find the cached transcript that goes with a given source video."""
     p = abs_file(video_path)
@@ -931,6 +1082,37 @@ def _analyze_motion(video_path: str, sample_hz: float) -> ToolResponse:
     return ToolResponse(ok=True, data=result, next_steps=next_steps)
 
 
+def _detect_scenes(
+    video_path: str, sample_hz: float, min_shot_sec: float,
+) -> ToolResponse:
+    p = abs_file(video_path)
+    if isinstance(p, ToolResponse):
+        return p
+    if not (0.5 <= sample_hz <= 10.0):
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"sample_hz must be in [0.5, 10.0], got {sample_hz}")
+    if min_shot_sec < 0:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"min_shot_sec must be >= 0, got {min_shot_sec}")
+    try:
+        result = scenes.detect_scenes(
+            p, cache_dir(None), sample_hz=sample_hz, min_shot_sec=min_shot_sec,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("detect_scenes failed")
+        return to_error(e)
+    next_steps = None
+    if result.get("shots"):
+        next_steps = {
+            "view_shots": (
+                "Each shots[i].rep_frame_path is a JPEG on disk. Read them "
+                "via get_clip_thumbnail(video_path=<rep_frame_path>) to "
+                "vision-inspect what each shot shows."
+            ),
+        }
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
+
+
 # ----- v0.8.0 implementations ------------------------------------------
 
 
@@ -1045,6 +1227,34 @@ def _render_preview(sequence_spec_data: dict, output_path: str) -> ToolResponse:
             "before calling generate_fcpxml on the same spec."
         ),
         "ship_it": f"generate_fcpxml(sequence_spec=<same spec>, output_path='<abs>')",
+    })
+
+
+def _render_cut_async(
+    sequence_spec_data: dict, output_path: str, preset: str,
+) -> ToolResponse:
+    from roughcut_core import render
+    if preset not in render.PRESETS:
+        return ToolResponse(
+            ok=False, error="invalid_spec",
+            message=(f"unknown preset '{preset}'. "
+                     f"Choices: {sorted(render.PRESETS)}"),
+        )
+    out = abs_path(output_path)
+    if isinstance(out, ToolResponse):
+        return out
+    try:
+        spec = SequenceSpec.model_validate(sequence_spec_data)
+    except Exception as e:  # noqa: BLE001
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"SequenceSpec invalid: {e}")
+    if not spec.aroll:
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message="SequenceSpec.aroll is empty")
+    return _spawn("render_cut", {
+        "sequence_spec": spec.model_dump(mode="json"),
+        "output_path": str(out),
+        "preset": preset,
     })
 
 

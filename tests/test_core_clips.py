@@ -20,6 +20,18 @@ def _make_clip(path: Path, *, duration: int = 2, rate: int = 24, size: str = "32
     )
 
 
+def _make_av_clip(path: Path, *, duration: int = 2) -> None:
+    """testsrc video + 440 Hz sine tone audio, mux to H.264/AAC."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", f"testsrc=duration={duration}:size=320x240:rate=24",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={duration}",
+         "-shortest", "-pix_fmt", "yuv420p",
+         "-c:v", "libx264", "-c:a", "aac", str(path)],
+        check=True,
+    )
+
+
 def test_parse_rational() -> None:
     assert clips._parse_rational("24000/1001") == pytest.approx(23.976, rel=1e-3)
     assert clips._parse_rational("24/1") == 24.0
@@ -39,6 +51,16 @@ def test_probe_clip_returns_metadata(tmp_path: Path) -> None:
     assert (meta.width, meta.height) == (320, 240)
     assert meta.codec  # ffmpeg picks something
     assert meta.size_bytes > 0
+    # Video-only testsrc has no audio stream.
+    assert meta.has_audio is False
+
+
+@requires_ffmpeg
+def test_probe_clip_detects_audio_stream(tmp_path: Path) -> None:
+    clip_path = tmp_path / "av.mp4"
+    _make_av_clip(clip_path, duration=2)
+    meta = clips.probe_clip(clip_path)
+    assert meta.has_audio is True
 
 
 @requires_ffmpeg

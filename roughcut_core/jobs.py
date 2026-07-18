@@ -57,6 +57,7 @@ ASYNC_TOOLS = frozenset({
     "detect_multicam_groups",
     "diarize_speakers",
     "pick_angle_per_segment",
+    "render_cut",
 })
 
 # Concurrency cap for the persistent worker pool. Default 4: empirically

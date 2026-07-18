@@ -90,6 +90,7 @@ class ClipMeta(BaseModel):
     height: int
     codec: str
     size_bytes: int
+    has_audio: bool = False
 
 
 # ---------------------------------------------------------------------------

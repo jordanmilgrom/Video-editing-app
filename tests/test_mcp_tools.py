@@ -133,6 +133,9 @@ def test_build_server_registers_expected_tools() -> None:
             "detect_false_starts", "tighten_take"}.issubset(names)
     # v0.10.0: multi-modal segment watching
     assert "watch_segment" in names
+    # v0.11.0: batch/project + delivery + OTIO + scenes
+    assert {"transcribe_folder", "index_project",
+            "detect_scenes", "render_cut"}.issubset(names)
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:
