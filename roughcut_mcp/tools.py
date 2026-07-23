@@ -39,8 +39,8 @@ from mcp.types import TextContent
 from roughcut_core import (
     audio, broll, cache_io, captions, clips, documentary, edl, false_starts,
     fcp7_xml, fcpxml, fcpxml_validate, fillers, handles, index as project_index,
-    jobs, models_catalog, motion, otio_export, preview, scenes, system_status,
-    tighten, transcribe, watch,
+    jobs, models_catalog, motion, otio_export, preview, scene_analysis,
+    scenes, system_status, tighten, transcribe, watch,
 )
 from roughcut_core.models import AngleSelection, SequenceSpec
 from roughcut_mcp import descriptions as desc
@@ -54,8 +54,6 @@ log = logging.getLogger("roughcut_mcp.tools")
 
 def register_tools(mcp: FastMCP) -> None:
     """Register every roughcut tool on the given FastMCP server."""
-
-    # ----- Synchronous tools (fast, return inline) ---------------------------
 
     @mcp.tool(description=desc.LIST_CLIPS)
     def list_clips(folder: str, recursive: bool = True) -> ToolResponse:
@@ -116,8 +114,6 @@ def register_tools(mcp: FastMCP) -> None:
     def get_server_logs(tail: int = 100) -> ToolResponse:
         return _get_server_logs(tail)
 
-    # ----- Documentary / unscripted mode (sync; reads cached JSON) ---------
-
     @mcp.tool(description=desc.READ_TRANSCRIPT)
     def read_transcript(
         transcript_path: str, start_segment: int = 0,
@@ -163,7 +159,29 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> ToolResponse:
         return _detect_scenes(video_path, sample_hz, min_shot_sec)
 
-    # ----- v0.8.0: editorial intelligence II --------------------------------
+    # ----- v0.12.0: structured scene analysis (Level 2 of the video stack) --
+
+    @mcp.tool(description=desc.ANALYZE_SCENE)
+    def analyze_scene(
+        video_path: str, sample_hz: float = 2.0, num_frames: int = 25,
+    ) -> Any:
+        return _analyze_scene(video_path, sample_hz, num_frames)
+
+    @mcp.tool(description=desc.SAVE_SCENE_ANALYSIS)
+    def save_scene_analysis(
+        video_path: str, analysis: dict,
+    ) -> ToolResponse:
+        return _save_scene_analysis(video_path, analysis)
+
+    @mcp.tool(description=desc.READ_SCENE_ANALYSIS)
+    def read_scene_analysis(video_path: str) -> ToolResponse:
+        return _read_scene_analysis(video_path)
+
+    @mcp.tool(description=desc.SEARCH_SCENES)
+    def search_scenes(
+        query: str, folder_path: str | None = None, max_results: int = 20,
+    ) -> ToolResponse:
+        return _search_scenes(query, folder_path, max_results)
 
     @mcp.tool(description=desc.DETECT_FILLERS)
     def detect_fillers(
@@ -203,8 +221,6 @@ def register_tools(mcp: FastMCP) -> None:
         preset: str = "1080p30",
     ) -> ToolResponse:
         return _render_cut_async(sequence_spec, output_path, preset)
-
-    # ----- v0.9.0: waveform-based tightening --------------------------------
 
     @mcp.tool(description=desc.FIND_AUDIO_SILENCES)
     def find_audio_silences(
@@ -250,8 +266,6 @@ def register_tools(mcp: FastMCP) -> None:
             min_silence_sec, silence_threshold_db, min_segment_sec,
             include_fillers, include_breaths, include_false_starts,
         )
-
-    # ----- Async-job tools (return job_id, work in subprocess) ---------------
 
     @mcp.tool(description=desc.TRANSCRIBE_VIDEO)
     def transcribe_video(
@@ -346,8 +360,6 @@ def register_tools(mcp: FastMCP) -> None:
             "reaction_hold_sec": reaction_hold_sec,
         })
 
-    # ----- Job management ----------------------------------------------------
-
     @mcp.tool(description=desc.CHECK_JOB_STATUS)
     def check_job_status(job_id: str) -> ToolResponse:
         return _check_job_status(job_id)
@@ -377,7 +389,6 @@ def register_tools(mcp: FastMCP) -> None:
 
 
 def _spawn(tool_name: str, args: dict) -> ToolResponse:
-    """Spawn a worker subprocess (or return cached `succeeded` job)."""
     cdir = cache_dir(None)
     try:
         job = jobs.spawn(cdir, tool_name, args)
@@ -490,7 +501,6 @@ def _transcribe_folder(
     folder: str, language: str, model: str,
     recursive: bool, skip_silent: bool,
 ) -> ToolResponse:
-    """Fan out one transcribe_video job per clip in `folder`."""
     path = abs_dir(folder)
     if isinstance(path, ToolResponse):
         return path
@@ -561,9 +571,6 @@ def _transcribe_folder(
     })
 
 
-# ----- Synchronous tool implementations -------------------------------------
-
-
 def _list_clips(folder: str, recursive: bool) -> ToolResponse:
     path = abs_dir(folder)
     if isinstance(path, ToolResponse):
@@ -595,7 +602,7 @@ def _list_clips(folder: str, recursive: bool) -> ToolResponse:
 
 
 def _generate_fcpxml(sequence_spec_data: dict, output_path: str) -> ToolResponse:
-    """Emit four timeline formats + OTIO + EDL relink sidecar; self-validate."""
+    """Emit four timeline formats + OTIO + relink sidecar."""
     out = abs_path(output_path)
     if isinstance(out, ToolResponse):
         return out
@@ -826,7 +833,6 @@ def _get_system_status() -> ToolResponse:
 
 
 def _get_server_logs(tail: int) -> ToolResponse:
-    """Self-diagnosis: aggregate watchdog.log + worker-N.log into one tail."""
     try:
         capped_tail = max(1, min(1000, int(tail or 100)))
         result = log_tail.tail_recent(cache_dir(None), capped_tail)
@@ -926,7 +932,6 @@ def _index_project(
 
 
 def _lookup_transcript_by_video_path(video_path: str) -> ToolResponse:
-    """Find the cached transcript that goes with a given source video."""
     p = abs_file(video_path)
     if isinstance(p, ToolResponse):
         return p
@@ -953,7 +958,6 @@ def _lookup_transcript_by_video_path(video_path: str) -> ToolResponse:
 
 
 def _validate_source_bounds(spec: SequenceSpec) -> list[str]:
-    """ffprobe each unique source; return errors for out-of-range segments."""
     sources_to_check: set[Path] = set()
     for seg in spec.aroll:
         sources_to_check.add(fcpxml._resolve_for_dedup(seg.source_path))
@@ -1067,7 +1071,130 @@ def _detect_scenes(
     return ToolResponse(ok=True, data=result, next_steps=next_steps)
 
 
-# ----- v0.8.0 implementations ------------------------------------------
+# ----- v0.12.0: structured scene analysis ------------------------------
+
+
+def _analyze_scene(video_path: str, sample_hz: float, num_frames: int) -> Any:
+    path = abs_file(video_path)
+    if isinstance(path, ToolResponse):
+        return path
+    if not (0.5 <= sample_hz <= 10.0):
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"sample_hz must be in [0.5, 10.0], got {sample_hz}")
+    if not (4 <= num_frames <= 64):
+        return ToolResponse(ok=False, error="invalid_spec",
+                            message=f"num_frames must be in [4, 64], got {num_frames}")
+    try:
+        bundle = scene_analysis.build_scene_bundle(
+            path, cache_dir(None),
+            sample_hz=sample_hz, num_frames=num_frames,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("analyze_scene failed")
+        return to_error(e)
+    sidecar = json.dumps(bundle)
+    return [
+        Image(path=bundle["contact_sheet_path"]),
+        TextContent(type="text", text=sidecar),
+    ]
+
+
+def _save_scene_analysis(video_path: str, analysis_data: dict) -> ToolResponse:
+    path = abs_file(video_path)
+    if isinstance(path, ToolResponse):
+        return path
+    if not analysis_data.get("video_path"):
+        analysis_data["video_path"] = str(path)
+    if not analysis_data.get("video_hash"):
+        analysis_data["video_hash"] = scene_analysis._cache_key(path)
+    if analysis_data.get("duration_sec") in (None, 0, 0.0):
+        try:
+            meta = clips.probe_clip(path)
+            analysis_data["duration_sec"] = float(meta.duration_sec)
+        except Exception:  # noqa: BLE001
+            pass
+    if "shot_count" not in analysis_data:
+        analysis_data["shot_count"] = len(analysis_data.get("shots") or [])
+    try:
+        analysis = scene_analysis.SceneAnalysis.model_validate(analysis_data)
+    except Exception as e:  # noqa: BLE001
+        return ToolResponse(
+            ok=False, error="invalid_spec",
+            message=f"SceneAnalysis schema invalid: {e}",
+        )
+    try:
+        out = scene_analysis.write_scene_analysis(
+            path, cache_dir(None), analysis,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("save_scene_analysis failed")
+        return to_error(e)
+    return ToolResponse(ok=True, output_path=str(out), data={
+        "analysis_path": str(out),
+        "video_path": analysis.video_path,
+        "shot_count": analysis.shot_count,
+        "duration_sec": analysis.duration_sec,
+        "is_blooper": analysis.is_blooper,
+        "is_retake": analysis.is_retake,
+    }, next_steps={
+        "search_later": (
+            "search_scenes(query='<keyword>') finds this analysis in future "
+            "sessions without re-vision-reading the clip."
+        ),
+    })
+
+
+def _read_scene_analysis(video_path: str) -> ToolResponse:
+    path = abs_file(video_path)
+    if isinstance(path, ToolResponse):
+        return path
+    try:
+        analysis = scene_analysis.read_scene_analysis(path, cache_dir(None))
+    except Exception as e:  # noqa: BLE001
+        log.exception("read_scene_analysis failed")
+        return to_error(e)
+    if analysis is None:
+        return ToolResponse(
+            ok=False, error="not_a_file",
+            message="No cached scene analysis for this video.",
+            data={"video_path": str(path)},
+            next_steps={
+                "analyze_first": (
+                    f"analyze_scene(video_path='{path}') → vision-read → "
+                    f"save_scene_analysis(...)"
+                ),
+            },
+        )
+    return ToolResponse(ok=True, data=analysis.model_dump(mode="json"))
+
+
+def _search_scenes(
+    query: str, folder_path: str | None, max_results: int,
+) -> ToolResponse:
+    folder: Path | None = None
+    if folder_path:
+        resolved = abs_dir(folder_path)
+        if isinstance(resolved, ToolResponse):
+            return resolved
+        folder = resolved
+    capped = max(1, min(100, int(max_results or 20)))
+    try:
+        result = scene_analysis.search_scene_analyses(
+            query, cache_dir(None), folder_path=folder, max_results=capped,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("search_scenes failed")
+        return to_error(e)
+    next_steps = None
+    if result["result_count"] == 0:
+        next_steps = {
+            "analyze_first": (
+                "No matches — the analysis cache may be empty for this "
+                "shoot. Run analyze_scene + save_scene_analysis on "
+                "candidate clips first."
+            ),
+        }
+    return ToolResponse(ok=True, data=result, next_steps=next_steps)
 
 
 def _detect_fillers(
@@ -1239,9 +1366,6 @@ def _add_handles_to_spec(
             "plays the same; editors now have head/tail handles in the NLE."
         ),
     })
-
-
-# ----- v0.9.0 implementations ------------------------------------------
 
 
 def _find_audio_silences(
