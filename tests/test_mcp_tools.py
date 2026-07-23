@@ -103,43 +103,35 @@ def test_build_server_registers_expected_tools() -> None:
     import asyncio
     tool_objs = asyncio.run(server.list_tools())
     names = {t.name for t in tool_objs}
-    # Doc-mode tools (sync + async)
     assert {"list_clips", "transcribe_video", "cluster_takes_by_silence",
             "align_takes_to_script", "generate_fcpxml",
             "extract_frame_grid", "get_clip_thumbnail"}.issubset(names)
-    # Multicam tools
     assert {"detect_multicam_groups", "diarize_speakers",
             "pick_angle_per_segment", "generate_multicam_fcpxml"}.issubset(names)
-    # Job management (new in v0.6.0)
     assert {"check_job_status", "list_jobs", "cancel_job", "resume_job"}.issubset(names)
-    # Meta
     assert {"get_project_paths", "get_system_status"}.issubset(names)
-    # Documentary mode (new in v0.6.3)
     assert {"read_transcript", "search_transcripts", "summarize_clip"}.issubset(names)
-    # Prewarm tool (v0.6.1)
     assert "prewarm_model" in names
-    # v0.6.4: self-heal
     assert "restart_workers" in names
-    # v0.6.5: validation + lookup + log tail
     assert {"validate_fcpxml", "lookup_transcript_by_video_path",
             "get_server_logs"}.issubset(names)
-    # v0.7.0: editorial intelligence — silence-finding + motion analysis
     assert {"find_silences", "analyze_motion"}.issubset(names)
-    # v0.8.0: editorial intelligence II — fillers + captions + preview + handles
     assert {"detect_fillers", "describe_clip", "search_broll",
             "render_preview", "add_handles_to_spec"}.issubset(names)
-    # v0.9.0: waveform-based tightening + fused tighten_take
     assert {"find_audio_silences", "detect_breaths",
             "detect_false_starts", "tighten_take"}.issubset(names)
-    # v0.10.0: multi-modal segment watching
     assert "watch_segment" in names
+    assert {"transcribe_folder", "index_project",
+            "detect_scenes", "render_cut"}.issubset(names)
+    # v0.12.0: structured scene analysis (Level-2 video understanding)
+    assert {"analyze_scene", "save_scene_analysis",
+            "read_scene_analysis", "search_scenes"}.issubset(names)
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:
     res = tools._get_system_status()
     assert res.summary is not None
     details = res.summary["details"]
-    # ffmpeg/ffprobe live on the test host's PATH thanks to the conftest fixture.
     assert "ffmpeg" in details
     assert "python" in details
     assert details["python"]["ok"] is True
@@ -155,7 +147,6 @@ def test_check_job_status_returns_not_a_file_for_unknown_id(isolated_cache: Path
 def test_list_jobs_returns_empty_when_cache_is_fresh(isolated_cache: Path) -> None:
     res = tools._list_jobs(None, 100, 0)
     assert res.ok is True
-    # v0.6.4: pagination — total_count + returned_count instead of job_count.
     assert (res.summary or {})["total_count"] == 0
     assert (res.summary or {})["returned_count"] == 0
     assert (res.summary or {})["next_offset"] is None
