@@ -136,6 +136,9 @@ def test_build_server_registers_expected_tools() -> None:
     # v0.11.0: batch/project + delivery + OTIO + scenes
     assert {"transcribe_folder", "index_project",
             "detect_scenes", "render_cut"}.issubset(names)
+    # v0.12.0: structured scene analysis (Level-2 video understanding)
+    assert {"analyze_scene", "save_scene_analysis",
+            "read_scene_analysis", "search_scenes"}.issubset(names)
 
 
 def test_get_system_status_reports_ffmpeg_when_available(isolated_cache: Path) -> None:

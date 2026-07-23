@@ -24,7 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from roughcut_core import captions, clips, documentary
+from roughcut_core import captions, clips, documentary, scene_analysis
 
 
 def index_project(
@@ -57,6 +57,7 @@ def index_project(
     transcribed_count = 0
     silent_count = 0
     captioned_count = 0
+    scene_analyzed_count = 0
 
     for meta in clips.list_clips(folder, recursive=recursive):
         entry: dict[str, Any] = {
@@ -122,6 +123,24 @@ def index_project(
                 "mood": caption.get("mood"),
             }
 
+        # v0.12: structured scene analysis (if agent has authored one)
+        try:
+            sa = scene_analysis.read_scene_analysis(meta.path, cache_dir)
+        except Exception:  # noqa: BLE001
+            sa = None
+        if sa is not None:
+            scene_analyzed_count += 1
+            entry["scene_analysis"] = {
+                "one_line": sa.one_line,
+                "shot_count": sa.shot_count,
+                "usability_verdict": sa.usability_verdict,
+                "quality_issues": sa.quality_issues,
+                "color_palette": sa.color_palette,
+                "is_blooper": sa.is_blooper,
+                "is_retake": sa.is_retake,
+                "tags": sa.tags,
+            }
+
         entries.append(entry)
 
     return {
@@ -132,6 +151,7 @@ def index_project(
         "transcribed_count": transcribed_count,
         "silent_count": silent_count,
         "captioned_count": captioned_count,
+        "scene_analyzed_count": scene_analyzed_count,
         "clips": entries,
     }
 
